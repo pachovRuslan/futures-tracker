@@ -1,0 +1,8 @@
+{
+  "/api/sync/bybit/route": "app/api/sync/bybit/route.js",
+  "/api/trades/route": "app/api/trades/route.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/sync/bitunix/route": "app/api/sync/bitunix/route.js",
+  "/page": "app/page.js",
+  "/trades/page": "app/trades/page.js"
+}

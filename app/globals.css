@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme {
+  /* Фон — холодный почти-чёрный, а не нейтральный серый */
+  --color-bg: #0a0d12;
+  --color-surface: #12161d;
+  --color-surface-hover: #171c25;
+  --color-border: #232a35;
+
+  --color-text: #e7eaee;
+  --color-text-muted: #8b95a5;
+  --color-text-faint: #5b6473;
+
+  /* Профит/убыток — не чистый зелёный/красный, приглушённые терминальные оттенки */
+  --color-profit: #2dd4a7;
+  --color-profit-dim: #1a3a34;
+  --color-loss: #f0576b;
+  --color-loss-dim: #3a1f26;
+
+  /* Единственный акцент, используется точечно */
+  --color-accent: #4c7eff;
+
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+.font-mono-tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
