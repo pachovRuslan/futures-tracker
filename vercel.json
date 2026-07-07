@@ -1,6 +1,6 @@
 {
   "crons": [
-    { "path": "/api/sync/bybit", "schedule": "*/15 * * * *" },
-    { "path": "/api/sync/bitunix", "schedule": "*/15 * * * *" }
+    { "path": "/api/sync/bybit", "schedule": "0 0 * * *" },
+    { "path": "/api/sync/bitunix", "schedule": "0 0 * * *" }
   ]
 }
