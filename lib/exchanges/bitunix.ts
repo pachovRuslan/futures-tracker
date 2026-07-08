@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import type { Trade } from "../types";
+import type { SyncedTrade } from "../types";
 
 const BASE_URL = "https://fapi.bitunix.com";
 
@@ -79,7 +79,7 @@ export async function fetchBitunixHistoryPositions(opts?: {
   symbol?: string;
   skip?: number;
   limit?: number;
-}): Promise<Omit<Trade, "id">[]> {
+}): Promise<SyncedTrade[]> {
   const params: Record<string, string> = {};
   if (opts?.symbol) params.symbol = opts.symbol;
   if (opts?.skip) params.skip = String(opts.skip);

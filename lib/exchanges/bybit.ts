@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import type { Trade } from "../types";
+import type { SyncedTrade } from "../types";
 
 const BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
@@ -80,7 +80,7 @@ export async function fetchBybitClosedPnl(opts?: {
   cursor?: string;
   startTimeMs?: number;
   endTimeMs?: number;
-}): Promise<{ trades: Omit<Trade, "id">[]; nextCursor: string | null }> {
+}): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
   const params: Record<string, string> = {
     category: "linear",
     limit: "100",
@@ -94,7 +94,7 @@ export async function fetchBybitClosedPnl(opts?: {
     params
   );
 
-  const trades: Omit<Trade, "id">[] = data.result.list.map((item) => ({
+  const trades: SyncedTrade[] = data.result.list.map((item) => ({
     exchange: "bybit" as const,
     external_id: item.orderId,
     symbol: item.symbol,

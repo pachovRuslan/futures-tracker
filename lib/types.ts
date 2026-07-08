@@ -42,3 +42,8 @@ export interface ManualTradeInput {
   closed_at: string;
   notes: string | null;
 }
+
+// Данные, которые формируют клиенты бирж перед upsert-ом. Намеренно БЕЗ notes —
+// если передавать notes: null явно, upsert будет затирать вручную написанные
+// заметки при каждом ресинке. Отсутствие ключа в payload = колонка не трогается.
+export type SyncedTrade = Omit<Trade, "id" | "notes">;
