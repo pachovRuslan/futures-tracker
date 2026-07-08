@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import type { Trade, Exchange } from "@/lib/types";
 
 function fmt(n: number | null): string {
@@ -18,24 +18,65 @@ function fmtDate(iso: string): string {
   });
 }
 
+function NotesCell({ trade, onSaved }: { trade: Trade; onSaved: () => void }) {
+  const [value, setValue] = useState(trade.notes ?? "");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    if (value === (trade.notes ?? "")) return;
+    setSaving(true);
+    try {
+      await fetch(`/api/trades/${trade.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: value || null }),
+      });
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <input
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={save}
+      placeholder="заметка..."
+      disabled={saving}
+      className="w-full bg-transparent border-b border-transparent hover:border-[var(--color-border)] focus:border-[var(--color-accent)] outline-none text-xs text-[var(--color-text-muted)] py-1"
+    />
+  );
+}
+
 export default function TradesPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [filter, setFilter] = useState<Exchange | "all">("all");
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     setLoading(true);
     const qs = filter === "all" ? "" : `?exchange=${filter}`;
-    fetch(`/api/trades${qs}&limit=500`.replace("?&", "?"))
-      .then((r) => r.json())
-      .then((data) => setTrades(data.trades ?? []))
-      .finally(() => setLoading(false));
+    const res = await fetch(`/api/trades${qs}&limit=500`.replace("?&", "?"));
+    const data = await res.json();
+    setTrades(data.trades ?? []);
+    setLoading(false);
   }, [filter]);
 
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function remove(id: string) {
+    if (!confirm("Удалить эту сделку?")) return;
+    await fetch(`/api/trades/${id}`, { method: "DELETE" });
+    await load();
+  }
+
   return (
-    <div className="max-w-5xl mx-auto flex flex-col gap-6">
+    <div className="max-w-6xl mx-auto flex flex-col gap-6">
       <div className="flex items-center gap-3">
-        {(["all", "bybit", "bitunix"] as const).map((ex) => (
+        {(["all", "bybit", "bitunix", "manual"] as const).map((ex) => (
           <button
             key={ex}
             onClick={() => setFilter(ex)}
@@ -50,7 +91,7 @@ export default function TradesPage() {
         ))}
       </div>
 
-      <div className="rounded-lg border border-[var(--color-border)] overflow-hidden">
+      <div className="rounded-lg border border-[var(--color-border)] overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-[var(--color-surface)] text-[var(--color-text-faint)] text-xs uppercase tracking-wide">
@@ -62,6 +103,8 @@ export default function TradesPage() {
               <th className="text-right px-4 py-3 font-normal">Выход</th>
               <th className="text-right px-4 py-3 font-normal">Комиссия</th>
               <th className="text-right px-4 py-3 font-normal">PnL</th>
+              <th className="text-left px-4 py-3 font-normal w-48">Заметки</th>
+              <th className="px-4 py-3 font-normal"></th>
             </tr>
           </thead>
           <tbody>
@@ -72,7 +115,7 @@ export default function TradesPage() {
                   key={t.id}
                   className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
                 >
-                  <td className="px-4 py-2.5 font-mono-tabular text-[var(--color-text-muted)]">
+                  <td className="px-4 py-2.5 font-mono-tabular text-[var(--color-text-muted)] whitespace-nowrap">
                     {fmtDate(t.closed_at)}
                   </td>
                   <td className="px-4 py-2.5 text-[var(--color-text-muted)]">{t.exchange}</td>
@@ -98,6 +141,19 @@ export default function TradesPage() {
                   >
                     {positive ? "+" : ""}
                     {fmt(t.realized_pnl - t.fee + t.funding)}
+                  </td>
+                  <td className="px-2 py-1">
+                    <NotesCell trade={t} onSaved={load} />
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {t.exchange === "manual" && (
+                      <button
+                        onClick={() => remove(t.id)}
+                        className="text-xs text-[var(--color-text-faint)] hover:text-[var(--color-loss)]"
+                      >
+                        Удалить
+                      </button>
+                    )}
                   </td>
                 </tr>
               );

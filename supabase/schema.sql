@@ -1,6 +1,6 @@
 create table if not exists trades (
   id uuid primary key default gen_random_uuid(),
-  exchange text not null check (exchange in ('bybit', 'bitunix')),
+  exchange text not null check (exchange in ('bybit', 'bitunix', 'manual')),
   external_id text not null,
   symbol text not null,
   side text not null check (side in ('long', 'short')),
@@ -12,6 +12,7 @@ create table if not exists trades (
   funding numeric not null default 0,
   opened_at timestamptz,
   closed_at timestamptz not null,
+  notes text,
   raw jsonb,
   created_at timestamptz not null default now(),
   unique (exchange, external_id)
@@ -36,3 +37,10 @@ select
 from trades
 group by date_trunc('month', closed_at)
 order by date_trunc('month', closed_at) desc;
+
+-- ===== МИГРАЦИЯ для уже существующей базы (если schema.sql уже накатан раньше) =====
+-- Выполни этот блок отдельно в SQL Editor, если таблица trades уже создана:
+--
+-- alter table trades drop constraint if exists trades_exchange_check;
+-- alter table trades add constraint trades_exchange_check check (exchange in ('bybit', 'bitunix', 'manual'));
+-- alter table trades add column if not exists notes text;

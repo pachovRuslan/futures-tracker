@@ -1,4 +1,4 @@
-export type Exchange = "bybit" | "bitunix";
+export type Exchange = "bybit" | "bitunix" | "manual";
 
 export interface Trade {
   id: string;
@@ -14,6 +14,7 @@ export interface Trade {
   funding: number;
   opened_at: string | null;
   closed_at: string;
+  notes: string | null;
   raw: unknown;
 }
 
@@ -25,4 +26,19 @@ export interface MonthlySummary {
   netPnl: number;
   tradeCount: number;
   winRate: number;
+}
+
+// Поля, которые пользователь заполняет вручную при добавлении сделки
+export interface ManualTradeInput {
+  symbol: string;
+  side: "long" | "short";
+  qty: number | null;
+  entry_price: number | null;
+  close_price: number | null;
+  realized_pnl: number;
+  fee: number;
+  funding: number;
+  opened_at: string | null;
+  closed_at: string;
+  notes: string | null;
 }

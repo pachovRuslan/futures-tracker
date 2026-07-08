@@ -27,6 +27,9 @@ export default function RootLayout({
               <Link href="/trades" className="text-[var(--color-text)] hover:text-[var(--color-accent)]">
                 Сделки
               </Link>
+              <Link href="/manual" className="text-[var(--color-text)] hover:text-[var(--color-accent)]">
+                Добавить сделку
+              </Link>
             </nav>
           </header>
           <main className="flex-1 px-6 py-8">{children}</main>

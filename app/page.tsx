@@ -80,6 +80,16 @@ export default function DashboardPage() {
   const totalNet = trades.reduce((acc, t) => acc + (t.realized_pnl - t.fee + t.funding), 0);
   const currentMonth = summary[0];
 
+  const currentMonthTrades = currentMonth
+    ? trades.filter((t) => t.closed_at.slice(0, 7) === currentMonth.month)
+    : [];
+
+  const currentMonthNetPnls = currentMonthTrades.map((t) => t.realized_pnl - t.fee + t.funding);
+  const winCount = currentMonthNetPnls.filter((p) => p > 0).length;
+  const lossCount = currentMonthNetPnls.filter((p) => p <= 0).length;
+  const grossProfit = currentMonthNetPnls.filter((p) => p > 0).reduce((a, b) => a + b, 0);
+  const grossLoss = currentMonthNetPnls.filter((p) => p <= 0).reduce((a, b) => a + b, 0);
+
   const chartData = [...summary]
     .reverse()
     .map((s) => ({ month: s.month, netPnl: s.netPnl }));
@@ -118,11 +128,20 @@ export default function DashboardPage() {
       )}
 
       {currentMonth && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <StatCard label="Текущий месяц" value={<PnlValue value={currentMonth.netPnl} />} />
-          <StatCard label="Сделок" value={String(currentMonth.tradeCount)} />
-          <StatCard label="Win-rate" value={`${currentMonth.winRate}%`} />
-          <StatCard label="Комиссии" value={fmt(currentMonth.totalFee)} />
+        <div>
+          <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-2">
+            Статистика {currentMonth.month}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatCard label="Сделок" value={String(currentMonth.tradeCount)} />
+            <StatCard label="Прибыльных" value={String(winCount)} />
+            <StatCard label="Убыточных" value={String(lossCount)} />
+            <StatCard label="Win-rate" value={`${currentMonth.winRate}%`} />
+            <StatCard label="Общая прибыль" value={<PnlValue value={grossProfit} />} />
+            <StatCard label="Общий убыток" value={<PnlValue value={grossLoss} />} />
+            <StatCard label="Комиссии" value={fmt(currentMonth.totalFee)} />
+            <StatCard label="Итог месяца" value={<PnlValue value={currentMonth.netPnl} />} />
+          </div>
         </div>
       )}
 
