@@ -20,7 +20,7 @@ pnpm dev
 
 1. Запушить проект в GitHub-репозиторий.
 2. На vercel.com → **Add New → Project** → импортировать репозиторий (Vercel сам определит Next.js, никаких доп. настроек сборки не требуется).
-3. В **Project Settings → Environment Variables** добавить все переменные из `.env.example` (включая `APP_BASIC_AUTH_USER`/`PASSWORD` — без них Basic Auth будет выключена).
+3. В **Project Settings → Environment Variables** добавить все переменные из `.env.example`, включая `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`/`ALLOWED_EMAILS` — без них никто не сможет залогиниться (см. раздел про Google Auth ниже).
 4. Deploy.
 
 `vercel.json` уже содержит cron-задачи на синк каждые 15 минут — они дёргают `/api/sync/bybit` и `/api/sync/bitunix` напрямую. Проверить, что крон подхватился — в панели проекта, вкладка **Settings → Cron Jobs**.
@@ -45,7 +45,7 @@ alter table trades add column if not exists notes text;
 
 `/v5/position/closed-pnl` у Bybit жёстко ограничен диапазоном `endTime - startTime <= 7 дней`, а без явных `startTime`/`endTime` отдаёт вообще только последние 24 часа. Поэтому `/api/sync/bybit` сам нарезает период на 7-дневные окна.
 
-По умолчанию синкается год назад (`days=365`). Чтобы забрать более глубокую историю разово — дёрни вручную (например, через браузер, пока залогинен через Basic Auth):
+По умолчанию синкается год назад (`days=365`). Чтобы забрать более глубокую историю разово — дёрни вручную (например, через браузер, пока залогинен через Google):
 ```
 https://твой-домен.vercel.app/api/sync/bybit?days=730
 ```
@@ -61,20 +61,70 @@ https://твой-домен.vercel.app/api/sync/bybit?days=730
 - **Bitunix**: `/api/v1/futures/position/get_history_positions`. Подпись своя (двойной SHA-256 с nonce), детали в `lib/exchanges/bitunix.ts`. Если API требует `symbol` обязательным параметром — список тикеров задаётся через `BITUNIX_SYMBOLS` в `.env`.
 - Оба клиента писались по официальной документации на момент создания проекта (июль 2026) — перед боевым использованием стоит прогнать один тестовый синк и свериться вручную с 2-3 сделками, т.к. биржи периодически меняют формат ответов.
 
+## Авторизация через Google (шаг 1 из плана мультитенантности)
+
+Basic Auth заменён на настоящий логин через Supabase Auth + Google. Пока это **не полноценная мультитенантность** — все пользователи из `ALLOWED_EMAILS` видят одни и те же данные (таблица `trades` пока без `user_id`). Это нужно для следующего шага, чтобы не переделывать всё разом.
+
+**Настройка:**
+
+1. **Google Cloud Console** → создать OAuth 2.0 Client ID (тип "Web application").
+   - Authorized redirect URI: `https://<project-id>.supabase.co/auth/v1/callback`
+   - Сохранить Client ID и Client Secret.
+2. **Supabase Dashboard** → Authentication → Sign In / Providers → Google → включить, вставить Client ID/Secret из шага 1.
+3. **Supabase Dashboard** → Authentication → URL Configuration → добавить в Redirect URLs:
+   - `http://localhost:3000/auth/callback` (для локальной разработки)
+   - `https://твой-домен.vercel.app/auth/callback` (для продакшена)
+4. В `.env.local` / Vercel env добавить:
+   - `NEXT_PUBLIC_SUPABASE_URL` — тот же URL, что и `SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — берётся в Settings → API Keys → **Publishable key** (НЕ secret!)
+   - `ALLOWED_EMAILS` — твой email через запятую (если несколько человек — все через запятую). **Не оставляй пустым в продакшене**, иначе войти сможет кто угодно с Google-аккаунтом.
+5. `pnpm install` (подтянет `@supabase/ssr`), `pnpm dev`, проверить `/login`.
+
+## Шаг 2: RLS + user_id (мультитенантность на уровне БД)
+
+Теперь каждая сделка привязана к конкретному пользователю (`user_id`), и Postgres Row Level Security физически не даёт прочитать/изменить чужие сделки — даже если в коде где-то будет баг, база сама откажет в доступе.
+
+**Порядок действий (важно соблюдать именно так):**
+
+1. Убедись, что уже хотя бы раз залогинился через Google на сайте (после шага 1) — иначе некому будет привязать существующие сделки.
+2. Открой `supabase/migration_02_rls.sql`, в шаге 2 (`update trades set user_id = ...`) замени email в кавычках на свой (тот, которым логинишься через Google).
+3. Выполни миграцию в Supabase SQL Editor **по частям**: сначала шаги 1-3 (добавление колонки, backfill, проверка), глянь результат `select count(*) ...` — если 0, дальше можно выполнять шаги 4-7 целиком. Если не 0 — где-то разошёлся email, не выполняй `alter column ... set not null`, пока не поправишь.
+4. В Supabase Dashboard → Authentication → Users найди свою запись, скопируй значение из колонки **UID** (это `auth.users.id`).
+5. Добавь в `.env.local` и в Vercel env:
+   ```
+   SYNC_USER_ID=<скопированный UID>
+   ```
+   Без этой переменной синк-роуты Bybit/Bitunix будут падать с ошибкой — это осознанное поведение, чтобы синк не мог случайно записать сделки без владельца.
+6. Перезапусти `pnpm dev` (или редеплой на Vercel), проверь, что дашборд и синк работают как раньше.
+
+## Дорожная карта до полноценного мультитенантного SaaS
+
+1. ✅ Google Auth — вход настоящий, allowlist по email.
+2. ✅ RLS + `user_id` — данные физически изолированы на уровне БД, синк пишет от имени `SYNC_USER_ID` (пока один аккаунт).
+3. **Пользовательские API-ключи бирж** — форма подключения Bybit/Bitunix в UI, шифрование ключей перед записью в БД (например, через Supabase Vault), отдельная таблица `exchange_connections` с `user_id`.
+4. **Синк по всем пользователям** — cron-роуты переписать на цикл по всем активным подключениям из `exchange_connections` вместо одного `SYNC_USER_ID` и ключей из env.
+
 ## Структура
 
 ```
 app/
   page.tsx            — дашборд (сводка + график по месяцам)
   trades/page.tsx      — таблица сделок с фильтром по бирже
+  manual/page.tsx      — форма добавления сделок вручную
+  login/page.tsx        — страница входа (Google)
+  auth/callback/        — обмен OAuth-кода на сессию Supabase
   api/sync/bybit/      — синк с Bybit
   api/sync/bitunix/    — синк с Bitunix
-  api/trades/          — чтение сделок + месячной сводки
+  api/trades/          — чтение/создание сделок + месячной сводки
+  api/trades/[id]/      — редактирование заметок, удаление ручных сделок
 lib/
   exchanges/           — клиенты бирж (подпись + маппинг в общий формат Trade)
-  supabase.ts          — server-side клиент Supabase
+  supabase.ts          — server-side клиент Supabase (service_role, для синка)
+  supabase-browser.ts   — Supabase-клиент для браузера (Auth)
+  supabase-server.ts    — Supabase-клиент для Server Components/route handlers (Auth)
   types.ts             — общие типы
+components/SignOutButton.tsx — кнопка выхода из аккаунта
 supabase/schema.sql     — таблица trades + вьюха monthly_summary
-middleware.ts           — Basic Auth защита всего приложения
+middleware.ts           — проверка сессии Supabase Auth (Google) + allowlist по email
 vercel.json              — конфиг cron-задач на автосинк
 ```

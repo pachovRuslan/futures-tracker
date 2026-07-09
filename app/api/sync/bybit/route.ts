@@ -10,6 +10,15 @@ export async function GET(req: NextRequest) {
   try {
     const supabase = getSupabaseServerClient();
 
+    // Синк идёт по крону без пользовательской сессии, поэтому пишем от имени
+    // service_role и вручную проставляем user_id — пока один аккаунт на
+    // список ключей в env (см. README, шаг 3 дорожной карты — своя пара
+    // ключей на пользователя появится позже).
+    const syncUserId = process.env.SYNC_USER_ID;
+    if (!syncUserId) {
+      throw new Error("SYNC_USER_ID не задан в переменных окружения");
+    }
+
     // Bybit ограничивает closed-pnl диапазоном endTime-startTime <= 7 дней,
     // а без startTime/endTime отдаёт только последние 24 часа. Поэтому
     // нарезаем весь запрошенный период на 7-дневные окна и проходим их все.
@@ -36,9 +45,10 @@ export async function GET(req: NextRequest) {
         });
 
         if (trades.length > 0) {
+          const rows = trades.map((t) => ({ ...t, user_id: syncUserId }));
           const { error } = await supabase
             .from("trades")
-            .upsert(trades, { onConflict: "exchange,external_id" });
+            .upsert(rows, { onConflict: "user_id,exchange,external_id" });
           if (error) throw error;
           totalUpserted += trades.length;
         }

@@ -8,6 +8,11 @@ export async function GET() {
   try {
     const supabase = getSupabaseServerClient();
 
+    const syncUserId = process.env.SYNC_USER_ID;
+    if (!syncUserId) {
+      throw new Error("SYNC_USER_ID не задан в переменных окружения");
+    }
+
     // Список торгуемых символов задаём через env (BITUNIX_SYMBOLS=BTCUSDT,ETHUSDT),
     // т.к. get_history_positions на многих аккаунтах требует symbol в запросе.
     // Если у тебя API отдаёт все символы разом без фильтра — оставь
@@ -25,9 +30,10 @@ export async function GET() {
         const trades = await fetchBitunixHistoryPositions({ symbol, skip, limit });
         if (trades.length === 0) break;
 
+        const rows = trades.map((t) => ({ ...t, user_id: syncUserId }));
         const { error } = await supabase
           .from("trades")
-          .upsert(trades, { onConflict: "exchange,external_id" });
+          .upsert(rows, { onConflict: "user_id,exchange,external_id" });
         if (error) throw error;
 
         totalUpserted += trades.length;

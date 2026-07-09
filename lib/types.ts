@@ -2,6 +2,7 @@ export type Exchange = "bybit" | "bitunix" | "manual";
 
 export interface Trade {
   id: string;
+  user_id: string;
   exchange: Exchange;
   external_id: string;
   symbol: string;
@@ -46,4 +47,4 @@ export interface ManualTradeInput {
 // Данные, которые формируют клиенты бирж перед upsert-ом. Намеренно БЕЗ notes —
 // если передавать notes: null явно, upsert будет затирать вручную написанные
 // заметки при каждом ресинке. Отсутствие ключа в payload = колонка не трогается.
-export type SyncedTrade = Omit<Trade, "id" | "notes">;
+export type SyncedTrade = Omit<Trade, "id" | "notes" | "user_id">;

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
+import SignOutButton from "@/components/SignOutButton";
 
 export const metadata: Metadata = {
   title: "Futures Tracker",
@@ -30,6 +31,7 @@ export default function RootLayout({
               <Link href="/manual" className="text-[var(--color-text)] hover:text-[var(--color-accent)]">
                 Добавить сделку
               </Link>
+              <SignOutButton />
             </nav>
           </header>
           <main className="flex-1 px-6 py-8">{children}</main>

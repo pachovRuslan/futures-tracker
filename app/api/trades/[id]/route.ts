@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSupabaseServerClient } from "@/lib/supabase";
+import { createServerSupabaseClient } from "@/lib/supabase-server";
 
-// PATCH: заметки можно редактировать у ЛЮБОЙ сделки (bybit/bitunix/manual).
+// PATCH: заметки можно редактировать у ЛЮБОЙ своей сделки (bybit/bitunix/manual).
 // Остальные поля (цена, qty, pnl и т.д.) можно менять только у ручных сделок —
 // у синканных с биржи их в любом случае перезапишет следующий синк.
+// RLS (policy на update) сам не даст обновить чужую сделку — здесь дополнительно
+// проверяем только тип биржи, а не принадлежность пользователю.
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
-    const supabase = getSupabaseServerClient();
+    const supabase = await createServerSupabaseClient();
     const body = await req.json();
 
     const { data: existing, error: fetchError } = await supabase
@@ -22,10 +24,8 @@ export async function PATCH(
 
     const update: Record<string, unknown> = {};
 
-    // notes — всегда разрешено
     if ("notes" in body) update.notes = body.notes;
 
-    // остальные поля — только для manual
     if (existing.exchange === "manual") {
       const editableFields = [
         "symbol",
@@ -66,15 +66,14 @@ export async function PATCH(
   }
 }
 
-// DELETE: только ручные сделки — синканные с биржи удалять нельзя (появятся
-// снова на следующем синке, и это защищает от случайной потери реальных данных)
+// DELETE: только ручные сделки. RLS отдельно не даст удалить чужую сделку.
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
-    const supabase = getSupabaseServerClient();
+    const supabase = await createServerSupabaseClient();
 
     const { data: existing, error: fetchError } = await supabase
       .from("trades")

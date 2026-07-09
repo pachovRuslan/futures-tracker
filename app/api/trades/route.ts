@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSupabaseServerClient } from "@/lib/supabase";
+import { createServerSupabaseClient } from "@/lib/supabase-server";
 import type { ManualTradeInput } from "@/lib/types";
 
 export async function GET(req: NextRequest) {
   try {
-    const supabase = getSupabaseServerClient();
+    // Сессионный клиент — запросы идут от имени залогиненного пользователя,
+    // RLS сам отфильтрует только его сделки. service_role тут намеренно НЕ
+    // используется, иначе RLS будет полностью проигнорирован.
+    const supabase = await createServerSupabaseClient();
     const { searchParams } = new URL(req.url);
     const exchange = searchParams.get("exchange");
     const symbol = searchParams.get("symbol");
@@ -39,7 +42,15 @@ export async function GET(req: NextRequest) {
 // или сделки без API — просто заметки о торговле)
 export async function POST(req: NextRequest) {
   try {
-    const supabase = getSupabaseServerClient();
+    const supabase = await createServerSupabaseClient();
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+    }
+
     const body = (await req.json()) as ManualTradeInput;
 
     if (!body.symbol || !body.side || !body.closed_at) {
@@ -50,6 +61,7 @@ export async function POST(req: NextRequest) {
     }
 
     const row = {
+      user_id: user.id,
       exchange: "manual" as const,
       external_id: crypto.randomUUID(),
       symbol: body.symbol,
