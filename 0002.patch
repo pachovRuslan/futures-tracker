@@ -1,0 +1,289 @@
+From a4af151549d5c9446f6e4072792527a7f33d1ec9 Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Fri, 10 Jul 2026 23:22:18 +0000
+Subject: [PATCH 2/3] security: protect sync routes, fail-closed allowlist,
+ defensive user_id filtering
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- middleware.ts: пустой ALLOWED_EMAILS теперь блокирует вход вместо того,
+  чтобы пускать любого Google-аккаунт. Раньше это был footgun — README
+  предупреждал, но кодом не защищал.
+- /api/sync/{bybit,bitunix}: добавлена авторизация через новый helper
+  lib/auth.ts. Пропускает либо Vercel cron (заголовок Authorization: Bearer
+  $CRON_SECRET, который Vercel шлёт автоматически), либо залогиненного
+  пользователя (ручной запуск с дашборда). Раньше роуты были полностью
+  публичными.
+- /api/sync/*: redact логов — логируем только err.message, не весь объект,
+  чтобы в логи Vercel не попадал URL с HMAC-подписью.
+- /api/connections/[exchange] DELETE: добавлен .eq('user_id', user.id) —
+  defensive coding поверх RLS.
+- /api/trades/[id] PATCH/DELETE: добавлена проверка user и .eq('user_id',
+  user.id) в обоих запросах — defensive coding поверх RLS.
+- .env.example: добавлена документация для CRON_SECRET.
+---
+ .env.example                            |  9 ++++++
+ .gitignore                              |  2 +-
+ app/api/connections/[exchange]/route.ts |  4 +++
+ app/api/sync/bitunix/route.ts           | 13 ++++++--
+ app/api/sync/bybit/route.ts             | 10 ++++++-
+ app/api/trades/[id]/route.ts            | 23 +++++++++++++-
+ lib/auth.ts                             | 40 +++++++++++++++++++++++++
+ middleware.ts                           | 13 +++++++-
+ 8 files changed, 107 insertions(+), 7 deletions(-)
+ create mode 100644 lib/auth.ts
+
+diff --git a/.env.example b/.env.example
+index 134de2a..49be6f7 100644
+--- a/.env.example
++++ b/.env.example
+@@ -27,3 +27,12 @@ ENCRYPTION_KEY=
+ # Список торгуемых символов Bitunix через запятую — можно оставить пустым,
+ # тогда синк пойдёт по всем символам сразу (см. README)
+ BITUNIX_SYMBOLS=
++
++# Секрет для авторизации cron-запросов к /api/sync/*.
++# Vercel автоматически шлёт заголовок `Authorization: Bearer $CRON_SECRET`
++# при запуске cron-задач, если эта переменная задана. Без неё sync-роуты
++# были бы публичными — любой, кто знает URL, мог дёргать синк и забивать
++# rate-limit биржи.
++# Сгенерировать: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
++# Оставь пустым ТОЛЬКО для локальной разработки (на проде обязателен).
++CRON_SECRET=
+diff --git a/.gitignore b/.gitignore
+index be1ad58..78b885b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,4 +1,4 @@
+ node_modules
+ .next
+ .env.local
+-.env*.local
+\ No newline at end of file
++.env*.localtsconfig.tsbuildinfo
+diff --git a/app/api/connections/[exchange]/route.ts b/app/api/connections/[exchange]/route.ts
+index e98823b..b1c3600 100644
+--- a/app/api/connections/[exchange]/route.ts
++++ b/app/api/connections/[exchange]/route.ts
+@@ -16,6 +16,10 @@ export async function DELETE(
+     const { error } = await supabase
+       .from("exchange_connections")
+       .delete()
++      // Двойная защита: RLS и так не даст удалить чужое подключение, но
++      // явный фильтр по user_id — defensive coding, чтобы баг в RLS
++      // не привёл к утечке.
++      .eq("user_id", user.id)
+       .eq("exchange", exchange);
+     if (error) throw error;
+ 
+diff --git a/app/api/sync/bitunix/route.ts b/app/api/sync/bitunix/route.ts
+index 7f05655..05190a7 100644
+--- a/app/api/sync/bitunix/route.ts
++++ b/app/api/sync/bitunix/route.ts
+@@ -1,12 +1,17 @@
+-import { NextResponse } from "next/server";
++import { NextRequest, NextResponse } from "next/server";
+ import { getSupabaseServerClient } from "@/lib/supabase";
+ import { decrypt } from "@/lib/crypto";
+ import { fetchBitunixHistoryPositions } from "@/lib/exchanges/bitunix";
++import { authorizeSyncRequest } from "@/lib/auth";
+ 
+ export const maxDuration = 60;
+ 
+-export async function GET() {
++export async function GET(req: NextRequest) {
+   try {
++    // Авторизация: Vercel cron (Bearer CRON_SECRET) ИЛИ залогиненный пользователь.
++    const authFail = await authorizeSyncRequest(req);
++    if (authFail) return authFail;
++
+     const supabase = getSupabaseServerClient();
+ 
+     const syncUserId = process.env.SYNC_USER_ID;
+@@ -63,7 +68,9 @@ export async function GET() {
+ 
+     return NextResponse.json({ ok: true, upserted: totalUpserted });
+   } catch (err) {
+-    console.error("Bitunix sync error", err);
++    // Логируем только сообщение, без полного объекта — в err может быть
++    // URL запроса с подписью, которое не должно попадать в логи Vercel.
++    console.error("Bitunix sync error:", err instanceof Error ? err.message : String(err));
+     return NextResponse.json(
+       { ok: false, error: err instanceof Error ? err.message : String(err) },
+       { status: 500 }
+diff --git a/app/api/sync/bybit/route.ts b/app/api/sync/bybit/route.ts
+index c26920e..1445e5c 100644
+--- a/app/api/sync/bybit/route.ts
++++ b/app/api/sync/bybit/route.ts
+@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
+ import { getSupabaseServerClient } from "@/lib/supabase";
+ import { decrypt } from "@/lib/crypto";
+ import { fetchBybitClosedPnl } from "@/lib/exchanges/bybit";
++import { authorizeSyncRequest } from "@/lib/auth";
+ 
+ export const maxDuration = 60;
+ 
+@@ -9,6 +10,11 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+ 
+ export async function GET(req: NextRequest) {
+   try {
++    // Авторизация: Vercel cron (Bearer CRON_SECRET) ИЛИ залогиненный пользователь.
++    // Без этого роут был публичным и любой мог дёргать синк.
++    const authFail = await authorizeSyncRequest(req);
++    if (authFail) return authFail;
++
+     const supabase = getSupabaseServerClient();
+ 
+     // Синк идёт по крону без пользовательской сессии, поэтому читаем/пишем
+@@ -79,7 +85,9 @@ export async function GET(req: NextRequest) {
+ 
+     return NextResponse.json({ ok: true, upserted: totalUpserted });
+   } catch (err) {
+-    console.error("Bybit sync error", err);
++    // Логируем только сообщение, без полного объекта — в err может быть
++    // URL запроса с подписью, которое не должно попадать в логи Vercel.
++    console.error("Bybit sync error:", err instanceof Error ? err.message : String(err));
+     return NextResponse.json(
+       { ok: false, error: err instanceof Error ? err.message : String(err) },
+       { status: 500 }
+diff --git a/app/api/trades/[id]/route.ts b/app/api/trades/[id]/route.ts
+index f107414..c24c6f7 100644
+--- a/app/api/trades/[id]/route.ts
++++ b/app/api/trades/[id]/route.ts
+@@ -13,12 +13,20 @@ export async function PATCH(
+   try {
+     const { id } = await params;
+     const supabase = await createServerSupabaseClient();
++    const {
++      data: { user },
++    } = await supabase.auth.getUser();
++    if (!user) {
++      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
++    }
+     const body = await req.json();
+ 
++    // Явный фильтр по user_id — defensive coding поверх RLS.
+     const { data: existing, error: fetchError } = await supabase
+       .from("trades")
+       .select("exchange")
+       .eq("id", id)
++      .eq("user_id", user.id)
+       .single();
+     if (fetchError) throw fetchError;
+ 
+@@ -52,6 +60,7 @@ export async function PATCH(
+       .from("trades")
+       .update(update)
+       .eq("id", id)
++      .eq("user_id", user.id)
+       .select()
+       .single();
+     if (error) throw error;
+@@ -74,11 +83,19 @@ export async function DELETE(
+   try {
+     const { id } = await params;
+     const supabase = await createServerSupabaseClient();
++    const {
++      data: { user },
++    } = await supabase.auth.getUser();
++    if (!user) {
++      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
++    }
+ 
++    // Явный фильтр по user_id — defensive coding поверх RLS.
+     const { data: existing, error: fetchError } = await supabase
+       .from("trades")
+       .select("exchange")
+       .eq("id", id)
++      .eq("user_id", user.id)
+       .single();
+     if (fetchError) throw fetchError;
+ 
+@@ -89,7 +106,11 @@ export async function DELETE(
+       );
+     }
+ 
+-    const { error } = await supabase.from("trades").delete().eq("id", id);
++    const { error } = await supabase
++      .from("trades")
++      .delete()
++      .eq("id", id)
++      .eq("user_id", user.id);
+     if (error) throw error;
+ 
+     return NextResponse.json({ ok: true });
+diff --git a/lib/auth.ts b/lib/auth.ts
+new file mode 100644
+index 0000000..0812c01
+--- /dev/null
++++ b/lib/auth.ts
+@@ -0,0 +1,40 @@
++import { NextRequest, NextResponse } from "next/server";
++import { createServerSupabaseClient } from "@/lib/supabase-server";
++
++/**
++ * Авторизация для sync-роутов (/api/sync/*).
++ *
++ * Пропускает один из двух случаев:
++ *   1. Vercel cron — он автоматически шлёт заголовок
++ *      `Authorization: Bearer $CRON_SECRET`, если переменная задана в env.
++ *   2. Залогиненный пользователь — для ручного запуска с дашборда
++ *      (кнопки "Синк Bybit" / "Синк Bitunix").
++ *
++ * Любой другой запрос получает 401. Раньше sync-роуты были полностью
++ * публичными — любой, кто знал URL, мог дёргать синк и забивать rate-limit
++ * биржи, даже не получая данных.
++ *
++ * Возвращает null, если запрос авторизован, либо NextResponse с ошибкой.
++ */
++export async function authorizeSyncRequest(
++  req: NextRequest
++): Promise<NextResponse | null> {
++  // 1. Vercel cron
++  const cronSecret = process.env.CRON_SECRET;
++  if (cronSecret) {
++    const authHeader = req.headers.get("authorization");
++    if (authHeader === `Bearer ${cronSecret}`) {
++      return null;
++    }
++  }
++
++  // 2. Пользовательская сессия (ручной запуск)
++  const supabase = await createServerSupabaseClient();
++  const {
++    data: { user },
++  } = await supabase.auth.getUser();
++  if (!user) {
++    return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
++  }
++  return null;
++}
+diff --git a/middleware.ts b/middleware.ts
+index 07141cc..2db1617 100644
+--- a/middleware.ts
++++ b/middleware.ts
+@@ -42,8 +42,19 @@ export async function middleware(request: NextRequest) {
+     data: { user },
+   } = await supabase.auth.getUser();
+ 
++  // FAIL-CLOSED: если ALLOWED_EMAILS пуст — никого не пускаем. Раньше пустой
++  // список означал «открытый вход для любого Google-аккаунта», что в проде
++  // опасная конфигурация (футган упоминался в README, теперь кодом защищены).
++  if (allowedEmails.length === 0) {
++    console.error(
++      "[middleware] ALLOWED_EMAILS пуст — вход заблокирован. " +
++        "Задайте переменную окружения со списком email-ов через запятую."
++    );
++    return NextResponse.redirect(new URL("/not-allowed", request.url));
++  }
++
+   const email = user?.email?.toLowerCase();
+-  const isAllowed = !!email && (allowedEmails.length === 0 || allowedEmails.includes(email));
++  const isAllowed = !!email && allowedEmails.includes(email);
+ 
+   if (!user) {
+     return NextResponse.redirect(new URL("/login", request.url));
+-- 
+2.47.3
+
