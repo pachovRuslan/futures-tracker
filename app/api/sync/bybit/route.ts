@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase";
 import { decrypt } from "@/lib/crypto";
 import { fetchBybitClosedPnl } from "@/lib/exchanges/bybit";
+import { authorizeSyncRequest } from "@/lib/auth";
 
 export const maxDuration = 60;
 
@@ -9,6 +10,11 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function GET(req: NextRequest) {
   try {
+    // Авторизация: Vercel cron (Bearer CRON_SECRET) ИЛИ залогиненный пользователь.
+    // Без этого роут был публичным и любой мог дёргать синк.
+    const authFail = await authorizeSyncRequest(req);
+    if (authFail) return authFail;
+
     const supabase = getSupabaseServerClient();
 
     // Синк идёт по крону без пользовательской сессии, поэтому читаем/пишем
@@ -79,7 +85,9 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ ok: true, upserted: totalUpserted });
   } catch (err) {
-    console.error("Bybit sync error", err);
+    // Логируем только сообщение, без полного объекта — в err может быть
+    // URL запроса с подписью, которое не должно попадать в логи Vercel.
+    console.error("Bybit sync error:", err instanceof Error ? err.message : String(err));
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : String(err) },
       { status: 500 }

@@ -13,12 +13,20 @@ export async function PATCH(
   try {
     const { id } = await params;
     const supabase = await createServerSupabaseClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+    }
     const body = await req.json();
 
+    // Явный фильтр по user_id — defensive coding поверх RLS.
     const { data: existing, error: fetchError } = await supabase
       .from("trades")
       .select("exchange")
       .eq("id", id)
+      .eq("user_id", user.id)
       .single();
     if (fetchError) throw fetchError;
 
@@ -52,6 +60,7 @@ export async function PATCH(
       .from("trades")
       .update(update)
       .eq("id", id)
+      .eq("user_id", user.id)
       .select()
       .single();
     if (error) throw error;
@@ -74,11 +83,19 @@ export async function DELETE(
   try {
     const { id } = await params;
     const supabase = await createServerSupabaseClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+    }
 
+    // Явный фильтр по user_id — defensive coding поверх RLS.
     const { data: existing, error: fetchError } = await supabase
       .from("trades")
       .select("exchange")
       .eq("id", id)
+      .eq("user_id", user.id)
       .single();
     if (fetchError) throw fetchError;
 
@@ -89,7 +106,11 @@ export async function DELETE(
       );
     }
 
-    const { error } = await supabase.from("trades").delete().eq("id", id);
+    const { error } = await supabase
+      .from("trades")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", user.id);
     if (error) throw error;
 
     return NextResponse.json({ ok: true });

@@ -42,8 +42,19 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  // FAIL-CLOSED: если ALLOWED_EMAILS пуст — никого не пускаем. Раньше пустой
+  // список означал «открытый вход для любого Google-аккаунта», что в проде
+  // опасная конфигурация (футган упоминался в README, теперь кодом защищены).
+  if (allowedEmails.length === 0) {
+    console.error(
+      "[middleware] ALLOWED_EMAILS пуст — вход заблокирован. " +
+        "Задайте переменную окружения со списком email-ов через запятую."
+    );
+    return NextResponse.redirect(new URL("/not-allowed", request.url));
+  }
+
   const email = user?.email?.toLowerCase();
-  const isAllowed = !!email && (allowedEmails.length === 0 || allowedEmails.includes(email));
+  const isAllowed = !!email && allowedEmails.includes(email);
 
   if (!user) {
     return NextResponse.redirect(new URL("/login", request.url));

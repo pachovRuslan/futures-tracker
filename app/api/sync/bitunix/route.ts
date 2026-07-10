@@ -1,12 +1,17 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase";
 import { decrypt } from "@/lib/crypto";
 import { fetchBitunixHistoryPositions } from "@/lib/exchanges/bitunix";
+import { authorizeSyncRequest } from "@/lib/auth";
 
 export const maxDuration = 60;
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    // Авторизация: Vercel cron (Bearer CRON_SECRET) ИЛИ залогиненный пользователь.
+    const authFail = await authorizeSyncRequest(req);
+    if (authFail) return authFail;
+
     const supabase = getSupabaseServerClient();
 
     const syncUserId = process.env.SYNC_USER_ID;
@@ -63,7 +68,9 @@ export async function GET() {
 
     return NextResponse.json({ ok: true, upserted: totalUpserted });
   } catch (err) {
-    console.error("Bitunix sync error", err);
+    // Логируем только сообщение, без полного объекта — в err может быть
+    // URL запроса с подписью, которое не должно попадать в логи Vercel.
+    console.error("Bitunix sync error:", err instanceof Error ? err.message : String(err));
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : String(err) },
       { status: 500 }

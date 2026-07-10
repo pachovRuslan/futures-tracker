@@ -16,6 +16,10 @@ export async function DELETE(
     const { error } = await supabase
       .from("exchange_connections")
       .delete()
+      // Двойная защита: RLS и так не даст удалить чужое подключение, но
+      // явный фильтр по user_id — defensive coding, чтобы баг в RLS
+      // не привёл к утечке.
+      .eq("user_id", user.id)
       .eq("exchange", exchange);
     if (error) throw error;
 
