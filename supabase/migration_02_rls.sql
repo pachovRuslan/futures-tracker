@@ -10,7 +10,7 @@ alter table trades add column if not exists user_id uuid references auth.users(i
 -- 2. Backfill: привязываем все уже существующие сделки к твоему аккаунту.
 --    ЗАМЕНИ email на тот, которым логинишься через Google!
 update trades
-set user_id = (select id from auth.users where email = 'xyupizdaebaca@gmail.com')
+set user_id = (select id from auth.users where email = '<твой-email>@gmail.com')
 where user_id is null;
 
 -- 3. Проверка перед тем, как сделать колонку обязательной —
