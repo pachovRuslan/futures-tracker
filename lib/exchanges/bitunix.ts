@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
+import type { ExchangeCredentials } from "./bybit";
 
 const BASE_URL = "https://fapi.bitunix.com";
 
@@ -39,13 +40,10 @@ function sha256Hex(input: string): string {
  */
 function buildSignedHeaders(
   queryParams: Record<string, string>,
-  body: string
+  body: string,
+  credentials: ExchangeCredentials
 ) {
-  const apiKey = process.env.BITUNIX_API_KEY;
-  const secretKey = process.env.BITUNIX_API_SECRET;
-  if (!apiKey || !secretKey) {
-    throw new Error("BITUNIX_API_KEY / BITUNIX_API_SECRET не заданы");
-  }
+  const { apiKey, apiSecret: secretKey } = credentials;
 
   const nonce = crypto.randomBytes(16).toString("hex");
   const timestamp = Date.now().toString();
@@ -68,6 +66,14 @@ function buildSignedHeaders(
   };
 }
 
+function toIso(value: unknown): string {
+  const ms = Number(value);
+  if (!value || Number.isNaN(ms)) {
+    return new Date().toISOString();
+  }
+  return new Date(ms).toISOString();
+}
+
 /**
  * Забирает закрытые позиции по фьючерсам. Bitunix отдаёт realizedPNL, fee и
  * funding уже готовыми полями — почти не требует пересчёта.
@@ -75,17 +81,20 @@ function buildSignedHeaders(
  * передавать по одному тикеру за раз — если так, дергать эту функцию в
  * цикле по списку торгуемых символов.
  */
-export async function fetchBitunixHistoryPositions(opts?: {
-  symbol?: string;
-  skip?: number;
-  limit?: number;
-}): Promise<SyncedTrade[]> {
+export async function fetchBitunixHistoryPositions(
+  credentials: ExchangeCredentials,
+  opts?: {
+    symbol?: string;
+    skip?: number;
+    limit?: number;
+  }
+): Promise<SyncedTrade[]> {
   const params: Record<string, string> = {};
   if (opts?.symbol) params.symbol = opts.symbol;
   if (opts?.skip) params.skip = String(opts.skip);
   params.limit = String(opts?.limit ?? 100);
 
-  const headers = buildSignedHeaders(params, "");
+  const headers = buildSignedHeaders(params, "", credentials);
   const qs = new URLSearchParams(params).toString();
 
   const res = await fetch(
@@ -100,17 +109,6 @@ export async function fetchBitunixHistoryPositions(opts?: {
   const data = (await res.json()) as BitunixHistoryPositionsResponse;
   if (data.code !== 0) {
     throw new Error(`Bitunix API error ${data.code}: ${data.msg}`);
-  }
-
-  // Bitunix по документации отдаёт ctime/mtime как number (epoch ms), но на
-  // практике встречаются и строковые значения — приводим явно через Number()
-  // и подстраховываемся на случай отсутствующих/битых полей.
-  function toIso(value: unknown): string {
-    const ms = Number(value);
-    if (!value || Number.isNaN(ms)) {
-      return new Date().toISOString(); // не должно происходить, но не роняем весь синк
-    }
-    return new Date(ms).toISOString();
   }
 
   return data.data.positionList.map((p) => ({
@@ -128,4 +126,9 @@ export async function fetchBitunixHistoryPositions(opts?: {
     closed_at: toIso(p.mtime),
     raw: p,
   }));
+}
+
+/** Лёгкая проверка валидности ключа */
+export async function testBitunixCredentials(credentials: ExchangeCredentials): Promise<void> {
+  await fetchBitunixHistoryPositions(credentials, { limit: 1 });
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase";
+import { decrypt } from "@/lib/crypto";
 import { fetchBitunixHistoryPositions } from "@/lib/exchanges/bitunix";
 
 export const maxDuration = 60;
@@ -12,6 +13,24 @@ export async function GET() {
     if (!syncUserId) {
       throw new Error("SYNC_USER_ID не задан в переменных окружения");
     }
+
+    const { data: connection, error: connError } = await supabase
+      .from("exchange_connections")
+      .select("api_key_encrypted, api_secret_encrypted")
+      .eq("user_id", syncUserId)
+      .eq("exchange", "bitunix")
+      .maybeSingle();
+    if (connError) throw connError;
+    if (!connection) {
+      throw new Error(
+        "Bitunix не подключён — добавь ключ на странице 'Подключения' перед синком"
+      );
+    }
+
+    const credentials = {
+      apiKey: decrypt(connection.api_key_encrypted),
+      apiSecret: decrypt(connection.api_secret_encrypted),
+    };
 
     // Список торгуемых символов задаём через env (BITUNIX_SYMBOLS=BTCUSDT,ETHUSDT),
     // т.к. get_history_positions на многих аккаунтах требует symbol в запросе.
@@ -27,7 +46,7 @@ export async function GET() {
       const limit = 100;
 
       for (let page = 0; page < 20; page++) {
-        const trades = await fetchBitunixHistoryPositions({ symbol, skip, limit });
+        const trades = await fetchBitunixHistoryPositions(credentials, { symbol, skip, limit });
         if (trades.length === 0) break;
 
         const rows = trades.map((t) => ({ ...t, user_id: syncUserId }));

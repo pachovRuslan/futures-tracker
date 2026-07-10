@@ -1,6 +1,5 @@
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
-import { type CookieOptions } from '@supabase/ssr'
 
 export async function createServerSupabaseClient() {
   const cookieStore = await cookies();
@@ -11,11 +10,11 @@ export async function createServerSupabaseClient() {
     {
       cookies: {
         getAll: () => cookieStore.getAll(),
-       setAll: (cookiesToSet: { name: string; value: string; options: CookieOptions }[]) => {
+        setAll: (cookiesToSet) => {
           try {
             cookiesToSet.forEach(({ name, value, options }) =>
               cookieStore.set(name, value, options)
-            )
+            );
           } catch {
             // Вызывается из Server Component, где нельзя писать cookies —
             // безопасно игнорировать, middleware всё равно обновит сессию

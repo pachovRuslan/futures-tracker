@@ -31,6 +31,9 @@ export default function RootLayout({
               <Link href="/manual" className="text-[var(--color-text)] hover:text-[var(--color-accent)]">
                 Добавить сделку
               </Link>
+              <Link href="/connections" className="text-[var(--color-text)] hover:text-[var(--color-accent)]">
+                Подключения
+              </Link>
               <SignOutButton />
             </nav>
           </header>

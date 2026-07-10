@@ -97,12 +97,32 @@ Basic Auth заменён на настоящий логин через Supabase
    Без этой переменной синк-роуты Bybit/Bitunix будут падать с ошибкой — это осознанное поведение, чтобы синк не мог случайно записать сделки без владельца.
 6. Перезапусти `pnpm dev` (или редеплой на Vercel), проверь, что дашборд и синк работают как раньше.
 
+## Шаг 3: пользовательские API-ключи бирж
+
+Ключи Bybit/Bitunix больше не лежат в env — вводятся через UI (страница **"Подключения"**), проверяются реальным запросом к бирже перед сохранением, и хранятся в БД зашифрованными (AES-256-GCM, ключ шифрования — только в env сервера, никогда в БД).
+
+**Настройка:**
+
+1. Сгенерируй ключ шифрования:
+   ```
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+   ```
+2. Добавь в `.env.local` и в Vercel env:
+   ```
+   ENCRYPTION_KEY=<результат команды выше>
+   ```
+   **Не теряй этот ключ** и не меняй его, когда уже сохранил подключения — без него зашифрованные ключи бирж не расшифровать, придётся переподключать биржи заново.
+3. В Supabase SQL Editor выполни `supabase/migration_03_exchange_connections.sql`.
+4. `BYBIT_API_KEY`/`BYBIT_API_SECRET`/`BITUNIX_API_KEY`/`BITUNIX_API_SECRET` можно убрать из env — больше не используются (`BITUNIX_SYMBOLS` пока остаётся в env, это шаг 4).
+5. `pnpm dev`, зайди на `/connections`, подключи Bybit и Bitunix заново (те же ключи, что были в env) — форма сама проверит их перед сохранением.
+6. Нажми "Синк" на дашборде — теперь ключи читаются из БД.
+
 ## Дорожная карта до полноценного мультитенантного SaaS
 
 1. ✅ Google Auth — вход настоящий, allowlist по email.
-2. ✅ RLS + `user_id` — данные физически изолированы на уровне БД, синк пишет от имени `SYNC_USER_ID` (пока один аккаунт).
-3. **Пользовательские API-ключи бирж** — форма подключения Bybit/Bitunix в UI, шифрование ключей перед записью в БД (например, через Supabase Vault), отдельная таблица `exchange_connections` с `user_id`.
-4. **Синк по всем пользователям** — cron-роуты переписать на цикл по всем активным подключениям из `exchange_connections` вместо одного `SYNC_USER_ID` и ключей из env.
+2. ✅ RLS + `user_id` — данные физически изолированы на уровне БД.
+3. ✅ Пользовательские API-ключи бирж — форма подключения, шифрование в БД, валидация перед сохранением. Пока обрабатывается один аккаунт (`SYNC_USER_ID`).
+4. **Синк по всем пользователям** — cron-роуты переписать на цикл по всем строкам `exchange_connections` вместо одного `SYNC_USER_ID`; там же стоит подумать про очередь/rate-limit, если пользователей станет много.
 
 ## Структура
 
@@ -111,20 +131,26 @@ app/
   page.tsx            — дашборд (сводка + график по месяцам)
   trades/page.tsx      — таблица сделок с фильтром по бирже
   manual/page.tsx      — форма добавления сделок вручную
+  connections/page.tsx  — управление подключениями к биржам
   login/page.tsx        — страница входа (Google)
   auth/callback/        — обмен OAuth-кода на сессию Supabase
   api/sync/bybit/      — синк с Bybit
   api/sync/bitunix/    — синк с Bitunix
   api/trades/          — чтение/создание сделок + месячной сводки
   api/trades/[id]/      — редактирование заметок, удаление ручных сделок
+  api/connections/      — список/добавление подключений к биржам
+  api/connections/[exchange]/ — отключение биржи
 lib/
   exchanges/           — клиенты бирж (подпись + маппинг в общий формат Trade)
   supabase.ts          — server-side клиент Supabase (service_role, для синка)
   supabase-browser.ts   — Supabase-клиент для браузера (Auth)
   supabase-server.ts    — Supabase-клиент для Server Components/route handlers (Auth)
+  crypto.ts             — AES-256-GCM шифрование ключей бирж
   types.ts             — общие типы
 components/SignOutButton.tsx — кнопка выхода из аккаунта
 supabase/schema.sql     — таблица trades + вьюха monthly_summary
+supabase/migration_02_rls.sql — миграция: user_id + RLS
+supabase/migration_03_exchange_connections.sql — миграция: таблица подключений к биржам
 middleware.ts           — проверка сессии Supabase Auth (Google) + allowlist по email
 vercel.json              — конфиг cron-задач на автосинк
 ```

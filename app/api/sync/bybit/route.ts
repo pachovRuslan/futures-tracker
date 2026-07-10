@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase";
+import { decrypt } from "@/lib/crypto";
 import { fetchBybitClosedPnl } from "@/lib/exchanges/bybit";
 
 export const maxDuration = 60;
@@ -10,14 +11,32 @@ export async function GET(req: NextRequest) {
   try {
     const supabase = getSupabaseServerClient();
 
-    // Синк идёт по крону без пользовательской сессии, поэтому пишем от имени
-    // service_role и вручную проставляем user_id — пока один аккаунт на
-    // список ключей в env (см. README, шаг 3 дорожной карты — своя пара
-    // ключей на пользователя появится позже).
+    // Синк идёт по крону без пользовательской сессии, поэтому читаем/пишем
+    // через service_role. Пока обрабатываем одного пользователя (SYNC_USER_ID)
+    // — цикл по ВСЕМ пользователям с подключённым Bybit появится в шаге 4
+    // дорожной карты (см. README).
     const syncUserId = process.env.SYNC_USER_ID;
     if (!syncUserId) {
       throw new Error("SYNC_USER_ID не задан в переменных окружения");
     }
+
+    const { data: connection, error: connError } = await supabase
+      .from("exchange_connections")
+      .select("api_key_encrypted, api_secret_encrypted")
+      .eq("user_id", syncUserId)
+      .eq("exchange", "bybit")
+      .maybeSingle();
+    if (connError) throw connError;
+    if (!connection) {
+      throw new Error(
+        "Bybit не подключён — добавь ключ на странице 'Подключения' перед синком"
+      );
+    }
+
+    const credentials = {
+      apiKey: decrypt(connection.api_key_encrypted),
+      apiSecret: decrypt(connection.api_secret_encrypted),
+    };
 
     // Bybit ограничивает closed-pnl диапазоном endTime-startTime <= 7 дней,
     // а без startTime/endTime отдаёт только последние 24 часа. Поэтому
@@ -38,7 +57,7 @@ export async function GET(req: NextRequest) {
       // Пагинация курсором внутри одного 7-дневного окна (на случай, если
       // сделок за неделю окажется больше 100)
       for (let page = 0; page < 10; page++) {
-        const { trades, nextCursor } = await fetchBybitClosedPnl({
+        const { trades, nextCursor } = await fetchBybitClosedPnl(credentials, {
           cursor,
           startTimeMs: windowStart,
           endTimeMs: windowEnd,

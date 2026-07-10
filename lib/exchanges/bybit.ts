@@ -4,6 +4,11 @@ import type { SyncedTrade } from "../types";
 const BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
 
+export interface ExchangeCredentials {
+  apiKey: string;
+  apiSecret: string;
+}
+
 interface BybitClosedPnlItem {
   orderId: string;
   symbol: string;
@@ -38,13 +43,10 @@ function sign(
 
 async function signedGet<T>(
   path: string,
-  params: Record<string, string>
+  params: Record<string, string>,
+  credentials: ExchangeCredentials
 ): Promise<T> {
-  const apiKey = process.env.BYBIT_API_KEY;
-  const apiSecret = process.env.BYBIT_API_SECRET;
-  if (!apiKey || !apiSecret) {
-    throw new Error("BYBIT_API_KEY / BYBIT_API_SECRET не заданы");
-  }
+  const { apiKey, apiSecret } = credentials;
 
   const timestamp = Date.now().toString();
   const queryString = new URLSearchParams(params).toString();
@@ -74,13 +76,18 @@ async function signedGet<T>(
 /**
  * Забирает закрытые позиции по USDT-перпетуалам (category=linear) начиная
  * с курсора. Bybit хранит closed-pnl историю максимум за 2 года и отдаёт
- * постранично через cursor.
+ * постранично через cursor. Ключи передаются параметром — берутся либо из
+ * exchange_connections (расшифрованные), либо (для обратной совместимости)
+ * из env при локальном запуске без БД-подключений.
  */
-export async function fetchBybitClosedPnl(opts?: {
-  cursor?: string;
-  startTimeMs?: number;
-  endTimeMs?: number;
-}): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
+export async function fetchBybitClosedPnl(
+  credentials: ExchangeCredentials,
+  opts?: {
+    cursor?: string;
+    startTimeMs?: number;
+    endTimeMs?: number;
+  }
+): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
   const params: Record<string, string> = {
     category: "linear",
     limit: "100",
@@ -91,7 +98,8 @@ export async function fetchBybitClosedPnl(opts?: {
 
   const data = await signedGet<BybitClosedPnlResponse>(
     "/v5/position/closed-pnl",
-    params
+    params,
+    credentials
   );
 
   const trades: SyncedTrade[] = data.result.list.map((item) => ({
@@ -114,4 +122,13 @@ export async function fetchBybitClosedPnl(opts?: {
     trades,
     nextCursor: data.result.nextPageCursor || null,
   };
+}
+
+/** Лёгкая проверка валидности ключа — дергает эндпоинт с limit=1 */
+export async function testBybitCredentials(credentials: ExchangeCredentials): Promise<void> {
+  await signedGet<BybitClosedPnlResponse>(
+    "/v5/position/closed-pnl",
+    { category: "linear", limit: "1" },
+    credentials
+  );
 }

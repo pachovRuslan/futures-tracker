@@ -1,6 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
-import { type CookieOptions } from '@supabase/ssr';
 
 // ALLOWED_EMAILS — временный allowlist, пока нет полноценной мультитенантности
 // (RLS + user_id на таблице trades). Кто угодно из этого списка может залогиниться
@@ -25,13 +24,13 @@ export async function middleware(request: NextRequest) {
     {
       cookies: {
         getAll: () => request.cookies.getAll(),
-       setAll: (cookiesToSet: { name: string; value: string; options: CookieOptions }[]) => {
+        setAll: (cookiesToSet) => {
           cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
           supabaseResponse = NextResponse.next({ request });
           cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set({ name, value, ...options })
+            supabaseResponse.cookies.set(name, value, options)
           );
-        }
+        },
       },
     }
   );
