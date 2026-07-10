@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase";
-import { decrypt } from "@/lib/crypto";
 import { fetchBybitClosedPnl } from "@/lib/exchanges/bybit";
-import { authorizeSyncRequest } from "@/lib/auth";
+import { authenticateSyncRequest } from "@/lib/auth";
+import { getSyncTargets, syncAllUsers, summarizeResults } from "@/lib/sync";
 
 export const maxDuration = 60;
 
@@ -10,39 +10,24 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function GET(req: NextRequest) {
   try {
-    // Авторизация: Vercel cron (Bearer CRON_SECRET) ИЛИ залогиненный пользователь.
-    // Без этого роут был публичным и любой мог дёргать синк.
-    const authFail = await authorizeSyncRequest(req);
-    if (authFail) return authFail;
+    // Авторизация: Vercel cron (Bearer CRON_SECRET) — синкаем всех,
+    // либо залогиненный пользователь — синкаем только его подключение.
+    const auth = await authenticateSyncRequest(req);
+    if ("error" in auth) return auth.error;
 
-    const supabase = getSupabaseServerClient();
-
-    // Синк идёт по крону без пользовательской сессии, поэтому читаем/пишем
-    // через service_role. Пока обрабатываем одного пользователя (SYNC_USER_ID)
-    // — цикл по ВСЕМ пользователям с подключённым Bybit появится в шаге 4
-    // дорожной карты (см. README).
-    const syncUserId = process.env.SYNC_USER_ID;
-    if (!syncUserId) {
-      throw new Error("SYNC_USER_ID не задан в переменных окружения");
+    // Список подключений к Bybit, которые нужно просинкать в этом запуске.
+    const targets = await getSyncTargets("bybit", auth);
+    if (targets.length === 0) {
+      return NextResponse.json({
+        ok: true,
+        processed: 0,
+        upserted: 0,
+        message:
+          auth.mode === "user"
+            ? "Bybit не подключён — добавь ключ на странице 'Подключения' перед синком"
+            : "Нет подключений к Bybit ни у одного пользователя",
+      });
     }
-
-    const { data: connection, error: connError } = await supabase
-      .from("exchange_connections")
-      .select("api_key_encrypted, api_secret_encrypted")
-      .eq("user_id", syncUserId)
-      .eq("exchange", "bybit")
-      .maybeSingle();
-    if (connError) throw connError;
-    if (!connection) {
-      throw new Error(
-        "Bybit не подключён — добавь ключ на странице 'Подключения' перед синком"
-      );
-    }
-
-    const credentials = {
-      apiKey: decrypt(connection.api_key_encrypted),
-      apiSecret: decrypt(connection.api_secret_encrypted),
-    };
 
     // Bybit ограничивает closed-pnl диапазоном endTime-startTime <= 7 дней,
     // а без startTime/endTime отдаёт только последние 24 часа. Поэтому
@@ -50,40 +35,60 @@ export async function GET(req: NextRequest) {
     // ?days=N — на сколько дней назад копать (по умолчанию — год).
     const daysParam = req.nextUrl.searchParams.get("days");
     const days = daysParam ? Number(daysParam) : 365;
-
     const now = Date.now();
     const rangeStart = now - days * 24 * 60 * 60 * 1000;
 
-    let totalUpserted = 0;
+    // Цикл по всем целям. Ошибки изолированы: если у одного пользователя
+    // ключ стал невалидным, остальные всё равно просинкаются.
+    const results = await syncAllUsers(targets, async ({ userId, credentials }) => {
+      const supabase = getSupabaseServerClient();
+      let userUpserted = 0;
 
-    for (let windowEnd = now; windowEnd > rangeStart; windowEnd -= SEVEN_DAYS_MS) {
-      const windowStart = Math.max(windowEnd - SEVEN_DAYS_MS, rangeStart);
-      let cursor: string | undefined;
+      for (let windowEnd = now; windowEnd > rangeStart; windowEnd -= SEVEN_DAYS_MS) {
+        const windowStart = Math.max(windowEnd - SEVEN_DAYS_MS, rangeStart);
+        let cursor: string | undefined;
 
-      // Пагинация курсором внутри одного 7-дневного окна (на случай, если
-      // сделок за неделю окажется больше 100)
-      for (let page = 0; page < 10; page++) {
-        const { trades, nextCursor } = await fetchBybitClosedPnl(credentials, {
-          cursor,
-          startTimeMs: windowStart,
-          endTimeMs: windowEnd,
-        });
+        // Пагинация курсором внутри одного 7-дневного окна (на случай, если
+        // сделок за неделю окажется больше 100)
+        for (let page = 0; page < 10; page++) {
+          const { trades, nextCursor } = await fetchBybitClosedPnl(credentials, {
+            cursor,
+            startTimeMs: windowStart,
+            endTimeMs: windowEnd,
+          });
 
-        if (trades.length > 0) {
-          const rows = trades.map((t) => ({ ...t, user_id: syncUserId }));
-          const { error } = await supabase
-            .from("trades")
-            .upsert(rows, { onConflict: "user_id,exchange,external_id" });
-          if (error) throw error;
-          totalUpserted += trades.length;
+          if (trades.length > 0) {
+            const rows = trades.map((t) => ({ ...t, user_id: userId }));
+            const { error } = await supabase
+              .from("trades")
+              .upsert(rows, { onConflict: "user_id,exchange,external_id" });
+            if (error) throw error;
+            userUpserted += trades.length;
+          }
+
+          if (!nextCursor) break;
+          cursor = nextCursor;
         }
-
-        if (!nextCursor) break;
-        cursor = nextCursor;
       }
+      return userUpserted;
+    });
+
+    const summary = summarizeResults(results);
+
+    // Для ручного запуска с дашборда: показываем человекочитаемую ошибку,
+    // если у текущего пользователя синк упал.
+    let userError: string | undefined;
+    if (auth.mode === "user") {
+      const userResult = results.find((r) => r.userId === auth.userId);
+      if (userResult?.error) userError = userResult.error;
     }
 
-    return NextResponse.json({ ok: true, upserted: totalUpserted });
+    return NextResponse.json({
+      ok: summary.failed === 0,
+      mode: auth.mode,
+      ...summary,
+      ...(userError ? { error: userError } : {}),
+    });
   } catch (err) {
     // Логируем только сообщение, без полного объекта — в err может быть
     // URL запроса с подписью, которое не должно попадать в логи Vercel.

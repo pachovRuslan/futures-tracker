@@ -1,30 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 
+export type SyncAuth =
+  | { mode: "cron" }
+  | { mode: "user"; userId: string }
+  | { error: NextResponse };
+
 /**
- * Авторизация для sync-роутов (/api/sync/*).
+ * Авторизация для sync-роутов (/api/sync/*) + определение режима работы.
  *
- * Пропускает один из двух случаев:
- *   1. Vercel cron — он автоматически шлёт заголовок
- *      `Authorization: Bearer $CRON_SECRET`, если переменная задана в env.
- *   2. Залогиненный пользователь — для ручного запуска с дашборда
- *      (кнопки "Синк Bybit" / "Синк Bitunix").
+ *   1. Vercel cron — заголовок `Authorization: Bearer $CRON_SECRET`, который
+ *      Vercel автоматически шлёт при запуске cron-задач. В этом режиме
+ *      синкаются ВСЕ подключения всех пользователей (cron не имеет сессии).
+ *   2. Залогиненный пользователь — ручной запуск с дашборда. В этом режиме
+ *      синкается ТОЛЬКО подключение этого пользователя.
  *
  * Любой другой запрос получает 401. Раньше sync-роуты были полностью
  * публичными — любой, кто знал URL, мог дёргать синк и забивать rate-limit
  * биржи, даже не получая данных.
- *
- * Возвращает null, если запрос авторизован, либо NextResponse с ошибкой.
  */
-export async function authorizeSyncRequest(
+export async function authenticateSyncRequest(
   req: NextRequest
-): Promise<NextResponse | null> {
+): Promise<SyncAuth> {
   // 1. Vercel cron
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
     const authHeader = req.headers.get("authorization");
     if (authHeader === `Bearer ${cronSecret}`) {
-      return null;
+      return { mode: "cron" };
     }
   }
 
@@ -34,7 +37,7 @@ export async function authorizeSyncRequest(
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+    return { error: NextResponse.json({ error: "Не авторизован" }, { status: 401 }) };
   }
-  return null;
+  return { mode: "user", userId: user.id };
 }
