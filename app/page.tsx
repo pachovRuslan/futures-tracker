@@ -77,7 +77,10 @@ export default function DashboardPage() {
     }
   }
 
-  const totalNet = trades.reduce((acc, t) => acc + (t.realized_pnl - t.fee + t.funding), 0);
+  // Итог по всем сделкам считаем из monthly_summary (БД-агрегат, уважает RLS),
+  // а не из trades.reduce — раньше был баг: trades обрезан limit=500, и при
+  // большой истории сумма получалась неполной.
+  const totalNet = summary.reduce((acc, s) => acc + s.netPnl, 0);
   const currentMonth = summary[0];
 
   const currentMonthTrades = currentMonth

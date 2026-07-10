@@ -56,8 +56,13 @@ export default function TradesPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const qs = filter === "all" ? "" : `?exchange=${filter}`;
-    const res = await fetch(`/api/trades${qs}&limit=500`.replace("?&", "?"));
+    // Раньше тут был баг: при filter==="all" URL получался вида
+    // `/api/trades&limit=500` (без "?"), и limit не парсился — сервер
+    // отдавал дефолтные 200 записей вместо 500. URLSearchParams строит
+    // валидный query string в обоих случаях.
+    const params = new URLSearchParams({ limit: "500" });
+    if (filter !== "all") params.set("exchange", filter);
+    const res = await fetch(`/api/trades?${params.toString()}`);
     const data = await res.json();
     setTrades(data.trades ?? []);
     setLoading(false);
