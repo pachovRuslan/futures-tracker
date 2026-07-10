@@ -10,8 +10,9 @@ const allowedEmails = (process.env.ALLOWED_EMAILS ?? "")
   .filter(Boolean);
 
 export async function middleware(request: NextRequest) {
-  // Публичные пути — логин и OAuth callback должны быть доступны без сессии
-  const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error"];
+  // Публичные пути — логин, OAuth callback и страница отказа должны быть
+  // доступны без полноценного прохождения проверки ниже
+  const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error", "/not-allowed"];
   if (publicPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
     return NextResponse.next();
   }
@@ -44,9 +45,11 @@ export async function middleware(request: NextRequest) {
   const email = user?.email?.toLowerCase();
   const isAllowed = !!email && (allowedEmails.length === 0 || allowedEmails.includes(email));
 
-  if (!user || !isAllowed) {
-    const loginUrl = new URL("/login", request.url);
-    return NextResponse.redirect(loginUrl);
+  if (!user) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+  if (!isAllowed) {
+    return NextResponse.redirect(new URL("/not-allowed", request.url));
   }
 
   return supabaseResponse;
