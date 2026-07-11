@@ -1,4 +1,10 @@
-export type Exchange = "bybit" | "bitunix" | "manual";
+// Exchange берётся из lib/exchanges/types.ts, чтобы при добавлении новой
+// биржи не надо было править этот тип — он автоматически расширится через
+// union в lib/exchanges/types.ts. "manual" — это не настоящая биржа, а ручные
+// сделки пользователя.
+import type { Exchange } from "@/lib/exchanges/types";
+
+export type { Exchange };
 
 export interface Trade {
   id: string;

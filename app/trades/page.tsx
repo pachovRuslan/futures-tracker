@@ -2,10 +2,19 @@
 
 import { useEffect, useState, useCallback } from "react";
 import type { Trade, Exchange } from "@/lib/types";
+import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 
 function fmt(n: number | null): string {
   if (n === null) return "—";
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
+}
+
+function fmtFee(fee: number, exchange: Exchange): string {
+  // Bybit closedPnl уже включает комиссию, и в API её можно получить только
+  // через отдельный эндпоинт /v5/account/transaction-log. Пока показываем «—»,
+  // чтобы не вводить в заблуждение нулями. Это известное ограничение — TODO.
+  if (exchange === "bybit" && fee === 0) return "—";
+  return fmt(fee);
 }
 
 function fmtDate(iso: string): string {
@@ -80,8 +89,8 @@ export default function TradesPage() {
 
   return (
     <div className="max-w-6xl mx-auto flex flex-col gap-6">
-      <div className="flex items-center gap-3">
-        {(["all", "bybit", "bitunix", "manual"] as const).map((ex) => (
+      <div className="flex items-center gap-3 flex-wrap">
+        {(["all", ...EXCHANGES, "manual"] as const).map((ex) => (
           <button
             key={ex}
             onClick={() => setFilter(ex)}
@@ -91,7 +100,7 @@ export default function TradesPage() {
                 : "border-[var(--color-border)] text-[var(--color-text-muted)]"
             }`}
           >
-            {ex === "all" ? "Все" : ex}
+            {ex === "all" ? "Все" : REGISTRY[ex as (typeof EXCHANGES)[number]]?.label ?? ex}
           </button>
         ))}
       </div>
@@ -123,7 +132,9 @@ export default function TradesPage() {
                   <td className="px-4 py-2.5 font-mono-tabular text-[var(--color-text-muted)] whitespace-nowrap">
                     {fmtDate(t.closed_at)}
                   </td>
-                  <td className="px-4 py-2.5 text-[var(--color-text-muted)]">{t.exchange}</td>
+                  <td className="px-4 py-2.5 text-[var(--color-text-muted)]">
+                    {t.exchange === "manual" ? "manual" : REGISTRY[t.exchange as (typeof EXCHANGES)[number]]?.label ?? t.exchange}
+                  </td>
                   <td className="px-4 py-2.5 font-mono-tabular">{t.symbol}</td>
                   <td className="px-4 py-2.5">
                     <span
@@ -137,7 +148,7 @@ export default function TradesPage() {
                   <td className="px-4 py-2.5 text-right font-mono-tabular">{fmt(t.entry_price)}</td>
                   <td className="px-4 py-2.5 text-right font-mono-tabular">{fmt(t.close_price)}</td>
                   <td className="px-4 py-2.5 text-right font-mono-tabular text-[var(--color-text-muted)]">
-                    {fmt(t.fee)}
+                    {fmtFee(t.fee, t.exchange)}
                   </td>
                   <td
                     className={`px-4 py-2.5 text-right font-mono-tabular ${

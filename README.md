@@ -59,7 +59,11 @@ https://твой-домен.vercel.app/api/sync/bybit?days=730
 
 - **Bybit**: `/v5/position/closed-pnl`, категория `linear` (USDT-перпетуалы). Подпись — стандартный HMAC-SHA256. `closedPnl` в ответе уже учитывает комиссию, поэтому `fee` в БД пишется как 0, чтобы не задваивать вычет — если увидишь расхождение с реальным балансом, можно поправить в `lib/exchanges/bybit.ts`.
 - **Bitunix**: `/api/v1/futures/position/get_history_positions`. Подпись своя (двойной SHA-256 с nonce), детали в `lib/exchanges/bitunix.ts`. Если API требует `symbol` обязательным параметром — список тикеров задаётся через `BITUNIX_SYMBOLS` в `.env`.
-- Оба клиента писались по официальной документации на момент создания проекта (июль 2026) — перед боевым использованием стоит прогнать один тестовый синк и свериться вручную с 2-3 сделками, т.к. биржи периодически меняют формат ответов.
+- **Binance**: `/fapi/v1/income` (REALIZED_PNL/COMMISSION/FUNDING_FEE) + `/fapi/v1/userTrades`. Подпись — HMAC-SHA256. PnL не включает комиссию, поэтому `fee` тянется отдельным запросом.
+- **Bitget**: `/api/v2/mix/position/history-position`, productType=USDT-FUTURES. Подпись HMAC-SHA256 с base64 (как у OKX), требует **passphrase** — третье поле в форме подключения. Timestamp берётся с сервера Bitget.
+- **BingX**: `/openApi/swap/v2/user/positions/history`. Подпись HMAC-SHA256 (как Binance). Пагинация по pageNum/pageSize. Возвращает готовые fee, fundingFee, realizedPNL.
+- **MEXC**: `/api/v1/private/position/list/history-position`. Подпись HMAC-SHA256. Пагинация по pageNum/pageSize. positionType: 1=Long, 2=Short.
+- Все клиенты писались по официальной документации на момент создания проекта (июль 2026) — перед боевым использованием стоит прогнать один тестовый синк и свериться вручную с 2-3 сделками, т.к. биржи периодически меняют формат ответов.
 
 ## Авторизация через Google (шаг 1 из плана мультитенантности)
 

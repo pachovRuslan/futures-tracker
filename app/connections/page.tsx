@@ -1,24 +1,21 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 
 interface Connection {
-  exchange: "bybit" | "bitunix";
+  exchange: (typeof EXCHANGES)[number];
   key_preview: string;
   created_at: string;
 }
 
-const EXCHANGES: { id: "bybit" | "bitunix"; label: string }[] = [
-  { id: "bybit", label: "Bybit" },
-  { id: "bitunix", label: "Bitunix" },
-];
-
 export default function ConnectionsPage() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
-  const [formExchange, setFormExchange] = useState<"bybit" | "bitunix">("bybit");
+  const [formExchange, setFormExchange] = useState<(typeof EXCHANGES)[number]>("bybit");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
+  const [passphrase, setPassphrase] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,21 +31,36 @@ export default function ConnectionsPage() {
     load();
   }, [load]);
 
+  function selectExchange(ex: (typeof EXCHANGES)[number]) {
+    setFormExchange(ex);
+    setError(null);
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setSaving(true);
     try {
+      const body: Record<string, string> = {
+        exchange: formExchange,
+        apiKey,
+        apiSecret,
+      };
+      if (REGISTRY[formExchange].credentialsSchema === "key+secret+passphrase") {
+        body.passphrase = passphrase;
+      }
+
       const res = await fetch("/api/connections", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ exchange: formExchange, apiKey, apiSecret }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Ошибка сохранения");
 
       setApiKey("");
       setApiSecret("");
+      setPassphrase("");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -64,6 +76,8 @@ export default function ConnectionsPage() {
   }
 
   const connectedExchanges = new Set(connections.map((c) => c.exchange));
+  const currentAdapter = REGISTRY[formExchange];
+  const needsPassphrase = currentAdapter.credentialsSchema === "key+secret+passphrase";
 
   return (
     <div className="max-w-2xl mx-auto flex flex-col gap-8">
@@ -80,7 +94,8 @@ export default function ConnectionsPage() {
           <div className="text-sm text-[var(--color-text-faint)]">Загрузка...</div>
         )}
         {!loading &&
-          EXCHANGES.map(({ id, label }) => {
+          EXCHANGES.map((id) => {
+            const adapter = REGISTRY[id];
             const conn = connections.find((c) => c.exchange === id);
             return (
               <div
@@ -88,7 +103,10 @@ export default function ConnectionsPage() {
                 className="flex items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3"
               >
                 <div className="flex items-center gap-3">
-                  <span className="text-sm">{label}</span>
+                  <span className="text-sm">{adapter.label}</span>
+                  {adapter.credentialsSchema === "key+secret+passphrase" && (
+                    <span className="text-xs text-[var(--color-text-faint)]">+ passphrase</span>
+                  )}
                   {conn ? (
                     <span className="text-xs font-mono-tabular text-[var(--color-profit)]">
                       подключено · {conn.key_preview}
@@ -124,12 +142,12 @@ export default function ConnectionsPage() {
           </label>
           <select
             value={formExchange}
-            onChange={(e) => setFormExchange(e.target.value as "bybit" | "bitunix")}
+            onChange={(e) => selectExchange(e.target.value as (typeof EXCHANGES)[number])}
             className="input"
           >
-            {EXCHANGES.map(({ id, label }) => (
+            {EXCHANGES.map((id) => (
               <option key={id} value={id}>
-                {label}
+                {REGISTRY[id].label}
               </option>
             ))}
           </select>
@@ -160,11 +178,30 @@ export default function ConnectionsPage() {
           />
         </div>
 
+        {needsPassphrase && (
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
+              Passphrase
+            </label>
+            <input
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              type="password"
+              className="input font-mono-tabular"
+              autoComplete="off"
+            />
+            <span className="text-xs text-[var(--color-text-faint)]">
+              {currentAdapter.label} требует третье поле — passphrase, который вы задали при
+              создании API-ключа на бирже.
+            </span>
+          </div>
+        )}
+
         {error && <div className="text-sm text-[var(--color-loss)]">{error}</div>}
 
         <button
           type="submit"
-          disabled={saving || !apiKey || !apiSecret}
+          disabled={saving || !apiKey || !apiSecret || (needsPassphrase && !passphrase)}
           className="px-4 py-2 rounded-md bg-[var(--color-accent)] text-white text-sm disabled:opacity-50 self-start"
         >
           {saving ? "Проверка ключа..." : "Сохранить"}

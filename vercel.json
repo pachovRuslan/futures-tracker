@@ -2,6 +2,10 @@
   "regions": ["fra1"],
   "crons": [
     { "path": "/api/sync/bybit", "schedule": "0 0 * * *" },
-    { "path": "/api/sync/bitunix", "schedule": "0 0 * * *" }
+    { "path": "/api/sync/bitunix", "schedule": "0 0 * * *" },
+    { "path": "/api/sync/binance", "schedule": "0 0 * * *" },
+    { "path": "/api/sync/bitget", "schedule": "0 0 * * *" },
+    { "path": "/api/sync/bingx", "schedule": "0 0 * * *" },
+    { "path": "/api/sync/mexc", "schedule": "0 0 * * *" }
   ]
 }

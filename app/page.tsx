@@ -12,6 +12,7 @@ import {
   Cell,
 } from "recharts";
 import type { MonthlySummary, Trade } from "@/lib/types";
+import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 
 function fmt(n: number): string {
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -37,7 +38,6 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<string | null>(null);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
-
   const load = useCallback(async () => {
     setLoading(true);
     const res = await fetch("/api/trades?limit=500");
@@ -61,17 +61,17 @@ export default function DashboardPage() {
     load();
   }, [load]);
 
-  async function runSync(exchange: "bybit" | "bitunix") {
+  async function runSync(exchange: (typeof EXCHANGES)[number]) {
     setSyncing(exchange);
     setSyncMsg(null);
     try {
       const res = await fetch(`/api/sync/${exchange}`);
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error ?? "Неизвестная ошибка");
-      setSyncMsg(`${exchange}: обновлено ${data.upserted} записей`);
+      setSyncMsg(`${REGISTRY[exchange].label}: обновлено ${data.upserted} записей`);
       await load();
     } catch (e) {
-      setSyncMsg(`${exchange}: ошибка — ${e instanceof Error ? e.message : String(e)}`);
+      setSyncMsg(`${REGISTRY[exchange].label}: ошибка — ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSyncing(null);
     }
@@ -108,21 +108,17 @@ export default function DashboardPage() {
             <PnlValue value={totalNet} />
           </div>
         </div>
-        <div className="flex gap-3">
-          <button
-            onClick={() => runSync("bybit")}
-            disabled={syncing !== null}
-            className="px-4 py-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-sm disabled:opacity-50"
-          >
-            {syncing === "bybit" ? "Синк..." : "Синк Bybit"}
-          </button>
-          <button
-            onClick={() => runSync("bitunix")}
-            disabled={syncing !== null}
-            className="px-4 py-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-sm disabled:opacity-50"
-          >
-            {syncing === "bitunix" ? "Синк..." : "Синк Bitunix"}
-          </button>
+        <div className="flex gap-2 flex-wrap">
+          {EXCHANGES.map((ex) => (
+            <button
+              key={ex}
+              onClick={() => runSync(ex)}
+              disabled={syncing !== null}
+              className="px-3 py-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-sm disabled:opacity-50"
+            >
+              {syncing === ex ? "Синк..." : `Синк ${REGISTRY[ex].label}`}
+            </button>
+          ))}
         </div>
       </div>
 

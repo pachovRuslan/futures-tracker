@@ -1,13 +1,9 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
+import type { ExchangeAdapter, ExchangeCredentials } from "./types";
 
 const BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
-
-export interface ExchangeCredentials {
-  apiKey: string;
-  apiSecret: string;
-}
 
 interface BybitClosedPnlItem {
   orderId: string;
@@ -20,6 +16,10 @@ interface BybitClosedPnlItem {
   cumEntryValue: string;
   createdTime: string; // ms epoch, открытие
   updatedTime: string; // ms epoch, закрытие
+  // Bybit V5 /v5/position/closed-pnl документированно НЕ возвращает fee.
+  // Но иногда биржа отдаёт undocumented поля — пробуем их читать, если есть.
+  execFee?: string;
+  feeRate?: string;
 }
 
 interface BybitClosedPnlResponse {
@@ -74,61 +74,106 @@ async function signedGet<T>(
 }
 
 /**
- * Забирает закрытые позиции по USDT-перпетуалам (category=linear) начиная
- * с курсора. Bybit хранит closed-pnl историю максимум за 2 года и отдаёт
- * постранично через cursor. Ключи передаются параметром — берутся либо из
- * exchange_connections (расшифрованные), либо (для обратной совместимости)
- * из env при локальном запуске без БД-подключений.
+ * Bybit V5: /v5/position/closed-pnl
+ *
+ * Ограничения биржи:
+ *   - История хранится ~2 года
+ *   - Диапазон endTime - startTime <= 7 дней (или последние 24ч без явных дат)
+ *   - Постраничная пагинация через cursor
+ *
+ * Поэтому fetchClosedTrades САМ нарезает запрошенный период на 7-дневные окна
+ * и проходит их все с пагинацией. Это специфика Bybit — раньше логика жила
+ * в route handler, теперь здесь, где ей и место.
+ *
+ * fee: Bybit closedPnl УЖЕ включает вычет комиссии, поэтому fee=0 чтобы не
+ * задваивать. Это корректно для PnL-сводки, но не для расчёта баланса
+ * (см. TODO в README — нужен отдельный эндпоинт /v5/account/transaction-log).
+ * Пробуем читать undocumented поле execFee, если биржа его отдаёт.
  */
-export async function fetchBybitClosedPnl(
+async function fetchClosedTrades(
   credentials: ExchangeCredentials,
-  opts?: {
-    cursor?: string;
-    startTimeMs?: number;
-    endTimeMs?: number;
-  }
+  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
 ): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
-  const params: Record<string, string> = {
-    category: "linear",
-    limit: "100",
-  };
-  if (opts?.cursor) params.cursor = opts.cursor;
-  if (opts?.startTimeMs) params.startTime = String(opts.startTimeMs);
-  if (opts?.endTimeMs) params.endTime = String(opts.endTimeMs);
+  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const until = opts?.untilMs ?? now;
+  // По умолчанию тянем год назад — как в старом route handler.
+  const since = opts?.sinceMs ?? now - 365 * 24 * 60 * 60 * 1000;
 
-  const data = await signedGet<BybitClosedPnlResponse>(
-    "/v5/position/closed-pnl",
-    params,
-    credentials
-  );
+  const allTrades: SyncedTrade[] = [];
+  let finalCursor: string | null = null;
 
-  const trades: SyncedTrade[] = data.result.list.map((item) => ({
-    exchange: "bybit" as const,
-    external_id: item.orderId,
-    symbol: item.symbol,
-    side: item.side === "Buy" ? "long" : "short",
-    qty: Number(item.qty),
-    entry_price: Number(item.avgEntryPrice),
-    close_price: Number(item.avgExitPrice),
-    realized_pnl: Number(item.closedPnl),
-    fee: 0, // fee уже вычтена из closedPnl биржей, храним 0 чтобы не задваивать
-    funding: 0,
-    opened_at: new Date(Number(item.createdTime)).toISOString(),
-    closed_at: new Date(Number(item.updatedTime)).toISOString(),
-    raw: item,
-  }));
+  // Нарезаем на 7-дневные окна — Bybit не отдаёт больше за один запрос.
+  for (let windowEnd = until; windowEnd > since; windowEnd -= SEVEN_DAYS_MS) {
+    const windowStart = Math.max(windowEnd - SEVEN_DAYS_MS, since);
+    let cursor: string | undefined = opts?.cursor;
 
-  return {
-    trades,
-    nextCursor: data.result.nextPageCursor || null,
-  };
+    // Пагинация курсором внутри одного окна (на случай, если сделок > 100).
+    for (let page = 0; page < 10; page++) {
+      const params: Record<string, string> = {
+        category: "linear",
+        limit: "100",
+        startTime: String(windowStart),
+        endTime: String(windowEnd),
+      };
+      if (cursor) params.cursor = cursor;
+
+      const data = await signedGet<BybitClosedPnlResponse>(
+        "/v5/position/closed-pnl",
+        params,
+        credentials
+      );
+
+      const trades: SyncedTrade[] = data.result.list.map((item) => {
+        // Пробуем взять fee из undocumented полей, если Bybit их отдаёт.
+        // Если нет — 0 (closedPnl уже включает вычет комиссии).
+        const fee = item.execFee ? Number(item.execFee) : 0;
+        return {
+          exchange: "bybit" as const,
+          external_id: item.orderId,
+          symbol: item.symbol,
+          side: item.side === "Buy" ? "long" : "short",
+          qty: Number(item.qty),
+          entry_price: Number(item.avgEntryPrice),
+          close_price: Number(item.avgExitPrice),
+          realized_pnl: Number(item.closedPnl),
+          fee,
+          funding: 0,
+          opened_at: new Date(Number(item.createdTime)).toISOString(),
+          closed_at: new Date(Number(item.updatedTime)).toISOString(),
+          raw: item,
+        };
+      });
+
+      allTrades.push(...trades);
+
+      if (!data.result.nextPageCursor) break;
+      cursor = data.result.nextPageCursor;
+    }
+  }
+
+  // Возвращаем null как nextCursor — все 7-дневные окна уже прошли.
+  // cursor от opts используется только для первой итерации первого окна,
+  // что достаточно для наших сценариев синка.
+  return { trades: allTrades, nextCursor: finalCursor };
 }
 
-/** Лёгкая проверка валидности ключа — дергает эндпоинт с limit=1 */
-export async function testBybitCredentials(credentials: ExchangeCredentials): Promise<void> {
+async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
   await signedGet<BybitClosedPnlResponse>(
     "/v5/position/closed-pnl",
     { category: "linear", limit: "1" },
     credentials
   );
 }
+
+export const bybitAdapter: ExchangeAdapter = {
+  id: "bybit",
+  label: "Bybit",
+  credentialsSchema: "key+secret",
+  fetchClosedTrades,
+  testCredentials,
+};
+
+// Обратная совместимость — старые импорты fetchBybitClosedPnl / testBybitCredentials.
+// deprecated, используйте bybitAdapter.fetchClosedTrades / bybitAdapter.testCredentials.
+export { fetchClosedTrades as fetchBybitClosedPnl, testCredentials as testBybitCredentials };

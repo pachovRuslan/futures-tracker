@@ -1,7 +1,8 @@
 import { getSupabaseServerClient } from "@/lib/supabase";
 import { decrypt } from "@/lib/crypto";
-import type { ExchangeCredentials } from "@/lib/exchanges/bybit";
+import type { ExchangeCredentials } from "@/lib/exchanges/types";
 import type { SyncAuth } from "@/lib/auth";
+import { EXCHANGES, isValidExchange } from "@/lib/exchanges";
 
 export interface SyncTarget {
   userId: string;
@@ -23,15 +24,17 @@ export interface SyncUserResult {
  * Ключи расшифровываются здесь же — наружу отдаются готовые credentials.
  */
 export async function getSyncTargets(
-  exchange: "bybit" | "bitunix",
+  exchange: (typeof EXCHANGES)[number],
   auth: SyncAuth
 ): Promise<SyncTarget[]> {
   if ("error" in auth) return [];
 
   const supabase = getSupabaseServerClient();
+  // Читаем в т.ч. passphrase_encrypted — для бирж, которые его требуют (Bitget, OKX, KuCoin).
+  // Для бирж без passphrase колонка будет null — просто не передаём поле.
   let query = supabase
     .from("exchange_connections")
-    .select("user_id, api_key_encrypted, api_secret_encrypted")
+    .select("user_id, api_key_encrypted, api_secret_encrypted, passphrase_encrypted")
     .eq("exchange", exchange);
 
   if (auth.mode === "user") {
@@ -42,13 +45,17 @@ export async function getSyncTargets(
   if (error) throw error;
   if (!data || data.length === 0) return [];
 
-  return data.map((row) => ({
-    userId: row.user_id,
-    credentials: {
+  return data.map((row) => {
+    const creds: ExchangeCredentials = {
       apiKey: decrypt(row.api_key_encrypted),
       apiSecret: decrypt(row.api_secret_encrypted),
-    },
-  }));
+    };
+    // passphrase может быть null для бирж без него (Bybit, Binance, MEXC, BingX).
+    if (row.passphrase_encrypted) {
+      creds.passphrase = decrypt(row.passphrase_encrypted);
+    }
+    return { userId: row.user_id, credentials: creds };
+  });
 }
 
 /**

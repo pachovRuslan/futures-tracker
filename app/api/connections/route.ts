@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { encrypt, maskKey } from "@/lib/crypto";
-import { testBybitCredentials } from "@/lib/exchanges/bybit";
-import { testBitunixCredentials } from "@/lib/exchanges/bitunix";
+import { REGISTRY, isValidExchange, getExchangeList } from "@/lib/exchanges";
 
 // Список подключений — специально выбираем только безопасные колонки.
 // Даже случайно не отдадим *_encrypted наружу.
@@ -23,7 +22,7 @@ export async function GET() {
 
     return NextResponse.json({ connections: data });
   } catch (err) {
-    console.error("Connections list error", err);
+    console.error("Connections list error:", err instanceof Error ? err.message : String(err));
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 500 }
@@ -42,10 +41,11 @@ export async function POST(req: NextRequest) {
     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
 
     const body = await req.json();
-    const { exchange, apiKey, apiSecret } = body as {
-      exchange: "bybit" | "bitunix";
+    const { exchange, apiKey, apiSecret, passphrase } = body as {
+      exchange: string;
       apiKey: string;
       apiSecret: string;
+      passphrase?: string;
     };
 
     if (!exchange || !apiKey || !apiSecret) {
@@ -54,22 +54,34 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    if (!["bybit", "bitunix"].includes(exchange)) {
+    if (!isValidExchange(exchange)) {
       return NextResponse.json({ error: "Неизвестная биржа" }, { status: 400 });
     }
+
+    const adapter = REGISTRY[exchange];
+
+    // Для бирж с passphrase-схемой проверяем, что passphrase передан.
+    if (adapter.credentialsSchema === "key+secret+passphrase" && !passphrase) {
+      return NextResponse.json(
+        { error: `${adapter.label} требует passphrase — укажите третье поле` },
+        { status: 400 }
+      );
+    }
+
+    const credentials = {
+      apiKey,
+      apiSecret,
+      ...(passphrase ? { passphrase } : {}),
+    };
 
     // Проверяем ключ перед сохранением — иначе узнаешь о невалидном ключе
     // только когда упадёт синк по крону
     try {
-      if (exchange === "bybit") {
-        await testBybitCredentials({ apiKey, apiSecret });
-      } else {
-        await testBitunixCredentials({ apiKey, apiSecret });
-      }
+      await adapter.testCredentials(credentials);
     } catch (testErr) {
       return NextResponse.json(
         {
-          error: `Не удалось подключиться к бирже с этим ключом: ${
+          error: `Не удалось подключиться к ${adapter.label} с этим ключом: ${
             testErr instanceof Error ? testErr.message : String(testErr)
           }`,
         },
@@ -77,7 +89,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const row = {
+    const row: Record<string, unknown> = {
       user_id: user.id,
       exchange,
       api_key_encrypted: encrypt(apiKey),
@@ -86,6 +98,15 @@ export async function POST(req: NextRequest) {
       updated_at: new Date().toISOString(),
     };
 
+    // Для бирж с passphrase — сохраняем отдельной зашифрованной колонкой.
+    if (passphrase) {
+      row.passphrase_encrypted = encrypt(passphrase);
+    } else {
+      // Если юзер переподключает биржу, которая раньше имела passphrase, а теперь нет —
+      // затираем старую. (На практике так не бывает, но defensively.)
+      row.passphrase_encrypted = null;
+    }
+
     const { error } = await supabase
       .from("exchange_connections")
       .upsert(row, { onConflict: "user_id,exchange" });
@@ -93,10 +114,16 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error("Connection create error", err);
+    console.error("Connection create error:", err instanceof Error ? err.message : String(err));
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 500 }
     );
   }
+}
+
+// GET-эндпоинт для UI: отдаёт список поддерживаемых бирж с их схемой credentials.
+// Используется формой подключения, чтобы знать, какие поля рендерить.
+export async function LIST() {
+  return NextResponse.json({ exchanges: getExchangeList() });
 }

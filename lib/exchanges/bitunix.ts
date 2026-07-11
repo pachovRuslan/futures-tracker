@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
-import type { ExchangeCredentials } from "./bybit";
+import type { ExchangeAdapter, ExchangeCredentials } from "./types";
 
 const BASE_URL = "https://fapi.bitunix.com";
 
@@ -61,7 +61,7 @@ function buildSignedHeaders(
     sign,
     nonce,
     timestamp,
-    language: "en-US",
+    "language": "en-US",
     "Content-Type": "application/json",
   };
 }
@@ -75,25 +75,83 @@ function toIso(value: unknown): string {
 }
 
 /**
- * Забирает закрытые позиции по фьючерсам. Bitunix отдаёт realizedPNL, fee и
- * funding уже готовыми полями — почти не требует пересчёта.
- * symbol опционален в их API, но по факту многие аккаунты требуют его
- * передавать по одному тикеру за раз — если так, дергать эту функцию в
- * цикле по списку торгуемых символов.
+ * Bitunix: /api/v1/futures/position/get_history_positions
+ *
+ * Особенности:
+ *   - symbol опционален в их API, но по факту многие аккаунты требуют его
+ *     передавать по одному тикеру за раз. Список тикеров берётся из env
+ *     BITUNIX_SYMBOLS (через запятую). Если env пустой — запрос без symbol.
+ *   - Пагинация через skip/limit (offset-based), не курсором.
+ *   - fee и funding приходят готовыми полями — почти не требуют пересчёта.
+ *
+ * Специфика цикла по символам живёт ЗДЕСЬ, а не в route handler.
  */
-export async function fetchBitunixHistoryPositions(
+async function fetchClosedTrades(
   credentials: ExchangeCredentials,
-  opts?: {
-    symbol?: string;
-    skip?: number;
-    limit?: number;
-  }
-): Promise<SyncedTrade[]> {
-  const params: Record<string, string> = {};
-  if (opts?.symbol) params.symbol = opts.symbol;
-  if (opts?.skip) params.skip = String(opts.skip);
-  params.limit = String(opts?.limit ?? 100);
+  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
+): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
+  // Список торгуемых символов из env. Если пусто — тянем все разом.
+  const symbolsEnv = process.env.BITUNIX_SYMBOLS?.trim();
+  const symbols = symbolsEnv ? symbolsEnv.split(",").map((s) => s.trim()) : [undefined];
 
+  const allTrades: SyncedTrade[] = [];
+
+  for (const symbol of symbols) {
+    let skip = 0;
+    const limit = 100;
+
+    // 20 страниц максимум на символ — защиты от бесконечного цикла.
+    for (let page = 0; page < 20; page++) {
+      const params: Record<string, string> = { limit: String(limit) };
+      if (symbol) params.symbol = symbol;
+      if (skip > 0) params.skip = String(skip);
+
+      const headers = buildSignedHeaders(params, "", credentials);
+      const qs = new URLSearchParams(params).toString();
+
+      const res = await fetch(
+        `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
+        { method: "GET", headers }
+      );
+
+      if (!res.ok) {
+        throw new Error(`Bitunix HTTP ${res.status}: ${await res.text()}`);
+      }
+
+      const data = (await res.json()) as BitunixHistoryPositionsResponse;
+      if (data.code !== 0) {
+        throw new Error(`Bitunix API error ${data.code}: ${data.msg}`);
+      }
+
+      const trades: SyncedTrade[] = data.data.positionList.map((p) => ({
+        exchange: "bitunix" as const,
+        external_id: p.positionId,
+        symbol: p.symbol,
+        side: p.side === "LONG" ? "long" : "short",
+        qty: Number(p.maxQty),
+        entry_price: Number(p.entryPrice),
+        close_price: Number(p.closePrice),
+        realized_pnl: Number(p.realizedPNL),
+        fee: Number(p.fee),
+        funding: Number(p.funding),
+        opened_at: toIso(p.ctime),
+        closed_at: toIso(p.mtime),
+        raw: p,
+      }));
+
+      allTrades.push(...trades);
+      if (trades.length < limit) break;
+      skip += limit;
+    }
+  }
+
+  // Bitunix не использует курсор — nextCursor всегда null.
+  return { trades: allTrades, nextCursor: null };
+}
+
+async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
+  // Простой запрос с limit=1 — если ключ невалиден, Bitunix вернёт ошибку.
+  const params: Record<string, string> = { limit: "1" };
   const headers = buildSignedHeaders(params, "", credentials);
   const qs = new URLSearchParams(params).toString();
 
@@ -101,34 +159,22 @@ export async function fetchBitunixHistoryPositions(
     `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
     { method: "GET", headers }
   );
-
   if (!res.ok) {
     throw new Error(`Bitunix HTTP ${res.status}: ${await res.text()}`);
   }
-
   const data = (await res.json()) as BitunixHistoryPositionsResponse;
   if (data.code !== 0) {
     throw new Error(`Bitunix API error ${data.code}: ${data.msg}`);
   }
-
-  return data.data.positionList.map((p) => ({
-    exchange: "bitunix" as const,
-    external_id: p.positionId,
-    symbol: p.symbol,
-    side: p.side === "LONG" ? "long" : "short",
-    qty: Number(p.maxQty),
-    entry_price: Number(p.entryPrice),
-    close_price: Number(p.closePrice),
-    realized_pnl: Number(p.realizedPNL),
-    fee: Number(p.fee),
-    funding: Number(p.funding),
-    opened_at: toIso(p.ctime),
-    closed_at: toIso(p.mtime),
-    raw: p,
-  }));
 }
 
-/** Лёгкая проверка валидности ключа */
-export async function testBitunixCredentials(credentials: ExchangeCredentials): Promise<void> {
-  await fetchBitunixHistoryPositions(credentials, { limit: 1 });
-}
+export const bitunixAdapter: ExchangeAdapter = {
+  id: "bitunix",
+  label: "Bitunix",
+  credentialsSchema: "key+secret",
+  fetchClosedTrades,
+  testCredentials,
+};
+
+// Обратная совместимость
+export { fetchClosedTrades as fetchBitunixHistoryPositions, testCredentials as testBitunixCredentials };
