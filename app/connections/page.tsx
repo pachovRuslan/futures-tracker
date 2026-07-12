@@ -3,6 +3,27 @@
 import { useEffect, useState, useCallback } from "react";
 import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 
+// Цветной бейдж-кружок на кнопке синка — визуальный якорь для каждой биржи,
+// без использования настоящих логотипов (только цвет + инициалы).
+const BADGE_COLOR: Record<string, string> = {
+  bybit: "#FFC94D",
+  bitunix: "#38E1C6",
+  binance: "#F3BA2F",
+  bitget: "#00E5FF",
+  bingx: "#8C9CFF",
+  mexc: "#C6A2FF",
+};
+
+function badgeInitials(exchange: string): string {
+  if (exchange === "bybit") return "B";
+  if (exchange === "bitunix") return "BX";
+  if (exchange === "binance") return "BN";
+  if (exchange === "bitget") return "BG";
+  if (exchange === "bingx") return "BGX";
+  if (exchange === "mexc") return "MX";
+  return exchange.slice(0, 2).toUpperCase();
+}
+
 interface Connection {
   exchange: (typeof EXCHANGES)[number];
   key_preview: string;
@@ -124,6 +145,12 @@ export default function ConnectionsPage() {
             return (
               <div key={id} className="card p-4 flex items-center justify-between gap-4 flex-wrap">
                 <div className="flex items-center gap-3 min-w-0">
+                  <span
+                    className="exchange-badge"
+                    style={{ background: BADGE_COLOR[id] ?? "var(--color-text-faint)" }}
+                  >
+                    {badgeInitials(id)}
+                  </span>
                   <div className="flex flex-col gap-0.5 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium">{adapter.label}</span>
@@ -147,9 +174,15 @@ export default function ConnectionsPage() {
                       <button
                         onClick={() => syncOne(id)}
                         disabled={syncing !== null}
-                        className="btn text-xs py-1.5 px-3"
+                        className="btn-pill"
                       >
-                        {syncing === id ? "..." : "Синк"}
+                        <span
+                          className="exchange-badge"
+                          style={{ background: BADGE_COLOR[id] ?? "var(--color-text-faint)" }}
+                        >
+                          {badgeInitials(id)}
+                        </span>
+                        {syncing === id ? "Синк..." : `Синк ${adapter.label}`}
                       </button>
                       <button
                         onClick={() => disconnect(id)}

@@ -36,10 +36,11 @@ function fmtFee(fee: number, exchange: string): string {
 function PnlValue({ value, size = "md" }: { value: number; size?: "md" | "lg" | "xl" }) {
   const positive = value >= 0;
   const sizeClass =
-    size === "xl" ? "text-4xl" : size === "lg" ? "text-2xl" : "text-xl";
+    size === "xl" ? "text-5xl" : size === "lg" ? "text-2xl" : "text-xl";
+  const glowClass = size === "xl" ? (positive ? "glow-profit" : "glow-loss") : "";
   return (
     <span
-      className={`font-mono-tabular font-semibold ${sizeClass} ${
+      className={`font-mono-tabular font-semibold ${sizeClass} ${glowClass} ${
         positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
       }`}
     >
@@ -181,17 +182,17 @@ export default function DashboardPage() {
   return (
     <div className="flex flex-col gap-6 max-w-6xl mx-auto">
       {/* Header: итог + синк */}
-      <div className="flex items-start justify-between flex-wrap gap-4">
+      <div className="card-hero flex items-start justify-between flex-wrap gap-4 p-6">
         <div>
           <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-1">
             Итог по всем сделкам
           </div>
           {loading ? (
-            <div className="skeleton h-10 w-40" />
+            <div className="skeleton h-12 w-48" />
           ) : (
             <PnlValue value={totalNet} size="xl" />
           )}
-          <div className="text-xs text-[var(--color-text-faint)] mt-1">
+          <div className="text-xs text-[var(--color-text-faint)] mt-2">
             {summary.length} {summary.length === 1 ? "месяц" : "месяцев"} в истории
           </div>
         </div>
@@ -307,6 +308,8 @@ export default function DashboardPage() {
                 fontFamily: "var(--font-mono)",
                 color: "var(--color-text)",
               }}
+              itemStyle={{ color: "var(--color-text)" }}
+              labelStyle={{ color: "var(--color-text-muted)", marginBottom: 4 }}
             />
             <Bar dataKey="netPnl" radius={[4, 4, 0, 0]}>
               {chartData.map((d, i) => (

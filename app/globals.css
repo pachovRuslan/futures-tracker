@@ -35,6 +35,11 @@
   /* Тултип графика */
   --chart-tooltip-bg: #12161d;
   --chart-grid: #232a35;
+
+  /* Свечение — для акцентных элементов (крупная цифра, карточка синка) */
+  --glow-profit: rgba(45, 212, 167, 0.35);
+  --glow-loss: rgba(240, 87, 107, 0.35);
+  --glow-accent: rgba(76, 126, 255, 0.25);
 }
 
 /* ============================================================
@@ -64,6 +69,10 @@
 
   --chart-tooltip-bg: #ffffff;
   --chart-grid: #e4e8ee;
+
+  --glow-profit: transparent;
+  --glow-loss: transparent;
+  --glow-accent: transparent;
 }
 
 /* ============================================================
@@ -76,6 +85,14 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Фоновое свечение — только в тёмной теме, фиксированное, не мешает скроллу */
+[data-theme="dark"] body {
+  background-image:
+    radial-gradient(circle at 12% 8%, rgba(45, 212, 167, 0.10), transparent 42%),
+    radial-gradient(circle at 88% 0%, rgba(76, 126, 255, 0.07), transparent 38%);
+  background-attachment: fixed;
 }
 
 .font-mono-tabular {
@@ -180,4 +197,79 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-faint);
+}
+
+/* ============================================================
+   Свечение — используется точечно (главная цифра итога), не везде,
+   чтобы не превратить интерфейс в неоновую вывеску
+   ============================================================ */
+.glow-profit {
+  text-shadow: 0 0 24px var(--glow-profit), 0 0 56px var(--glow-profit);
+}
+.glow-loss {
+  text-shadow: 0 0 24px var(--glow-loss), 0 0 56px var(--glow-loss);
+}
+
+/* Карточка с едва заметным градиентным ободком сверху — только для "hero"
+   блока итога, обычные .card остаются плоскими и спокойными */
+.card-hero {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card);
+  position: relative;
+  overflow: hidden;
+}
+[data-theme="dark"] .card-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, var(--glow-profit), transparent 40%, var(--glow-accent));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Кнопка-пилюля с цветным бейджем биржи (кружок с инициалами) —
+   используется в /connections для "Синк {Биржа}" */
+.btn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 8px 8px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.1s ease;
+}
+.btn-pill:hover:not(:disabled) {
+  border-color: var(--color-text-faint);
+}
+.btn-pill:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.btn-pill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.exchange-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: -0.02em;
+  color: #0a0d12;
+  flex-shrink: 0;
 }
