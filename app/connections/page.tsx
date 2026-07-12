@@ -18,6 +18,8 @@ export default function ConnectionsPage() {
   const [passphrase, setPassphrase] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState<string | null>(null);
+  const [syncMsgs, setSyncMsgs] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,21 +77,43 @@ export default function ConnectionsPage() {
     await load();
   }
 
-  const connectedExchanges = new Set(connections.map((c) => c.exchange));
+  async function syncOne(exchange: (typeof EXCHANGES)[number]) {
+    setSyncing(exchange);
+    setSyncMsgs((prev) => ({ ...prev, [exchange]: "Синк..." }));
+    try {
+      const res = await fetch(`/api/sync/${exchange}`);
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error ?? "Ошибка");
+      setSyncMsgs((prev) => ({
+        ...prev,
+        [exchange]: `✓ Обновлено ${data.upserted ?? 0} записей`,
+      }));
+    } catch (e) {
+      setSyncMsgs((prev) => ({
+        ...prev,
+        [exchange]: `✗ ${e instanceof Error ? e.message : String(e)}`,
+      }));
+    } finally {
+      setSyncing(null);
+    }
+  }
+
+  const connectedSet = new Set(connections.map((c) => c.exchange));
   const currentAdapter = REGISTRY[formExchange];
   const needsPassphrase = currentAdapter.credentialsSchema === "key+secret+passphrase";
 
   return (
-    <div className="max-w-2xl mx-auto flex flex-col gap-8">
+    <div className="max-w-3xl mx-auto flex flex-col gap-8">
       <div>
-        <h1 className="text-lg mb-1">Подключения к биржам</h1>
-        <p className="text-sm text-[var(--color-text-faint)]">
-          Ключи хранятся в зашифрованном виде и используются только для чтения истории закрытых
-          позиций (read-only). Проверяем ключ реальным запросом перед сохранением.
+        <h1 className="text-xl font-semibold mb-1">Подключения к биржам</h1>
+        <p className="text-sm text-[var(--color-text-muted)]">
+          Ключи хранятся зашифрованными (AES-256-GCM), используются только для чтения истории
+          закрытых позиций. Перед сохранением каждый ключ проверяется реальным запросом к бирже.
         </p>
       </div>
 
-      <div className="flex flex-col gap-3">
+      {/* Список бирж с статусом подключений */}
+      <div className="flex flex-col gap-2">
         {loading && (
           <div className="text-sm text-[var(--color-text-faint)]">Загрузка...</div>
         )}
@@ -98,42 +122,59 @@ export default function ConnectionsPage() {
             const adapter = REGISTRY[id];
             const conn = connections.find((c) => c.exchange === id);
             return (
-              <div
-                key={id}
-                className="flex items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="text-sm">{adapter.label}</span>
-                  {adapter.credentialsSchema === "key+secret+passphrase" && (
-                    <span className="text-xs text-[var(--color-text-faint)]">+ passphrase</span>
-                  )}
-                  {conn ? (
-                    <span className="text-xs font-mono-tabular text-[var(--color-profit)]">
-                      подключено · {conn.key_preview}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-[var(--color-text-faint)]">не подключено</span>
+              <div key={id} className="card p-4 flex items-center justify-between gap-4 flex-wrap">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="flex flex-col gap-0.5 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{adapter.label}</span>
+                      {adapter.credentialsSchema === "key+secret+passphrase" && (
+                        <span className="text-xs text-[var(--color-text-faint)]">+ passphrase</span>
+                      )}
+                    </div>
+                    {conn ? (
+                      <span className="text-xs font-mono-tabular text-[var(--color-profit)]">
+                        ✓ {conn.key_preview}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-[var(--color-text-faint)]">не подключено</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {conn && (
+                    <>
+                      <button
+                        onClick={() => syncOne(id)}
+                        disabled={syncing !== null}
+                        className="btn text-xs py-1.5 px-3"
+                      >
+                        {syncing === id ? "..." : "Синк"}
+                      </button>
+                      <button
+                        onClick={() => disconnect(id)}
+                        className="text-xs text-[var(--color-text-faint)] hover:text-[var(--color-loss)] px-2 py-1"
+                      >
+                        Отключить
+                      </button>
+                    </>
                   )}
                 </div>
-                {conn && (
-                  <button
-                    onClick={() => disconnect(id)}
-                    className="text-xs text-[var(--color-text-faint)] hover:text-[var(--color-loss)]"
-                  >
-                    Отключить
-                  </button>
+
+                {syncMsgs[id] && (
+                  <div className="w-full text-xs text-[var(--color-text-muted)] font-mono-tabular pt-1">
+                    {syncMsgs[id]}
+                  </div>
                 )}
               </div>
             );
           })}
       </div>
 
-      <form
-        onSubmit={submit}
-        className="flex flex-col gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5"
-      >
+      {/* Форма добавления/обновления */}
+      <form onSubmit={submit} className="card p-5 flex flex-col gap-4">
         <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
-          {connectedExchanges.has(formExchange) ? "Обновить ключ" : "Добавить подключение"}
+          {connectedSet.has(formExchange) ? "Обновить ключ" : "Добавить подключение"}
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -155,7 +196,7 @@ export default function ConnectionsPage() {
 
         <div className="flex flex-col gap-1.5">
           <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
-            API Key (read-only!)
+            API Key <span className="normal-case text-[var(--color-loss)]">(read-only!)</span>
           </label>
           <input
             value={apiKey}
@@ -202,27 +243,11 @@ export default function ConnectionsPage() {
         <button
           type="submit"
           disabled={saving || !apiKey || !apiSecret || (needsPassphrase && !passphrase)}
-          className="px-4 py-2 rounded-md bg-[var(--color-accent)] text-white text-sm disabled:opacity-50 self-start"
+          className="btn btn-primary self-start"
         >
           {saving ? "Проверка ключа..." : "Сохранить"}
         </button>
       </form>
-
-      <style>{`
-        .input {
-          background: var(--color-bg);
-          border: 1px solid var(--color-border);
-          border-radius: 6px;
-          padding: 8px 10px;
-          font-size: 14px;
-          color: var(--color-text);
-          width: 100%;
-        }
-        .input:focus {
-          outline: none;
-          border-color: var(--color-accent);
-        }
-      `}</style>
     </div>
   );
 }

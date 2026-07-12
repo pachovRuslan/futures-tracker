@@ -1,7 +1,16 @@
 @import "tailwindcss";
 
 @theme {
-  /* Фон — холодный почти-чёрный, а не нейтральный серый */
+  /* Шрифты */
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ============================================================
+   Тёмная тема (по умолчанию)
+   ============================================================ */
+:root,
+[data-theme="dark"] {
   --color-bg: #0a0d12;
   --color-surface: #12161d;
   --color-surface-hover: #171c25;
@@ -11,26 +20,164 @@
   --color-text-muted: #8b95a5;
   --color-text-faint: #5b6473;
 
-  /* Профит/убыток — не чистый зелёный/красный, приглушённые терминальные оттенки */
   --color-profit: #2dd4a7;
   --color-profit-dim: #1a3a34;
   --color-loss: #f0576b;
   --color-loss-dim: #3a1f26;
 
-  /* Единственный акцент, используется точечно */
   --color-accent: #4c7eff;
+  --color-accent-hover: #6b95ff;
 
-  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  /* Тени — мягкие, для светлой поверхности на тёмном фоне */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  /* Тултип графика */
+  --chart-tooltip-bg: #12161d;
+  --chart-grid: #232a35;
 }
 
+/* ============================================================
+   Светлая тема
+   ============================================================ */
+[data-theme="light"] {
+  --color-bg: #f8f9fb;
+  --color-surface: #ffffff;
+  --color-surface-hover: #f1f3f6;
+  --color-border: #e4e8ee;
+
+  --color-text: #1a1f2e;
+  --color-text-muted: #5b6473;
+  --color-text-faint: #8b95a5;
+
+  /* Прибыль/убыток — те же, что в тёмной (хорошо читаются на белом) */
+  --color-profit: #0d9488;
+  --color-profit-dim: #d1fae5;
+  --color-loss: #e11d48;
+  --color-loss-dim: #fee2e2;
+
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.1);
+
+  --chart-tooltip-bg: #ffffff;
+  --chart-grid: #e4e8ee;
+}
+
+/* ============================================================
+   Базовые стили
+   ============================================================ */
 body {
   background: var(--color-bg);
   color: var(--color-text);
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 .font-mono-tabular {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   Утилитарные классы (повторяют то, что было в компонентах)
+   ============================================================ */
+
+/* Карточка — базовый строительный блок интерфейса */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+/* Поля ввода — единый стиль для всех форм */
+.input {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--color-text);
+  width: 100%;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+.input::placeholder {
+  color: var(--color-text-faint);
+}
+
+/* Кнопки */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  color: #ffffff;
+  border-color: var(--color-accent);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+/* Skeleton loading для карточек */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface) 0%,
+    var(--color-surface-hover) 50%,
+    var(--color-surface) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+/* Скроллбар — тонкий, в цвет интерфейса */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-faint);
 }

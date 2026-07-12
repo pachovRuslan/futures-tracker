@@ -94,10 +94,10 @@ export default function TradesPage() {
           <button
             key={ex}
             onClick={() => setFilter(ex)}
-            className={`px-3 py-1.5 rounded-md text-sm border ${
+            className={`px-3 py-1.5 rounded-md text-sm border transition-colors ${
               filter === ex
-                ? "border-[var(--color-accent)] text-[var(--color-accent)]"
-                : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+                ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-surface)]"
+                : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
             }`}
           >
             {ex === "all" ? "Все" : REGISTRY[ex as (typeof EXCHANGES)[number]]?.label ?? ex}
@@ -105,7 +105,7 @@ export default function TradesPage() {
         ))}
       </div>
 
-      <div className="rounded-lg border border-[var(--color-border)] overflow-x-auto">
+      <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-[var(--color-surface)] text-[var(--color-text-faint)] text-xs uppercase tracking-wide">

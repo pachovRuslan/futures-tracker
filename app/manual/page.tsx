@@ -97,7 +97,7 @@ export default function ManualTradesPage() {
 
       <form
         onSubmit={submit}
-        className="grid grid-cols-2 gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5"
+        className="card p-5 grid grid-cols-2 gap-4"
       >
         <Field label="Символ *">
           <input
@@ -210,7 +210,7 @@ export default function ManualTradesPage() {
           <button
             type="submit"
             disabled={saving}
-            className="px-4 py-2 rounded-md bg-[var(--color-accent)] text-white text-sm disabled:opacity-50"
+            className="btn btn-primary"
           >
             {saving ? "Сохранение..." : "Добавить сделку"}
           </button>
@@ -221,7 +221,7 @@ export default function ManualTradesPage() {
         <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-3">
           Добавленные вручную ({manualTrades.length})
         </div>
-        <div className="rounded-lg border border-[var(--color-border)] overflow-hidden">
+        <div className="rounded-lg border border-[var(--color-border)] overflow-hidden card">
           {loading && (
             <div className="px-4 py-6 text-sm text-[var(--color-text-faint)]">Загрузка...</div>
           )}
@@ -268,21 +268,7 @@ export default function ManualTradesPage() {
         </div>
       </div>
 
-      <style>{`
-        .input {
-          background: var(--color-bg);
-          border: 1px solid var(--color-border);
-          border-radius: 6px;
-          padding: 8px 10px;
-          font-size: 14px;
-          color: var(--color-text);
-          width: 100%;
-        }
-        .input:focus {
-          outline: none;
-          border-color: var(--color-accent);
-        }
-      `}</style>
+      {/* <style> блок с .input больше не нужен — стили вынесены в globals.css */}
     </div>
   );
 }
