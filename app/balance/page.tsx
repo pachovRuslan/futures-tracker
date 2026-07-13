@@ -16,6 +16,7 @@ const emptyForm = {
   value_usd: "",
   snapshot_date: new Date().toISOString().slice(0, 10),
   note: "",
+  is_delta: false as boolean,
 };
 
 export default function BalancePage() {
@@ -24,6 +25,7 @@ export default function BalancePage() {
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastAppliedDelta, setLastAppliedDelta] = useState<{ delta: number; previous: number; total: number } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -37,13 +39,14 @@ export default function BalancePage() {
     load();
   }, [load]);
 
-  function updateField(field: keyof typeof emptyForm, value: string) {
+  function updateField<T extends keyof typeof emptyForm>(field: T, value: (typeof emptyForm)[T]) {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setLastAppliedDelta(null);
 
     if (!form.value_usd || !form.snapshot_date) {
       setError("Сумма и дата обязательны");
@@ -60,12 +63,22 @@ export default function BalancePage() {
           value_usd: Number(form.value_usd),
           snapshot_date: form.snapshot_date,
           note: form.note || null,
+          is_delta: form.is_delta,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Ошибка сохранения");
 
-      setForm({ ...emptyForm, type: form.type }); // сохраняем выбранный тип
+      // Если был режим дельты — показываем юзеру, что прибавили
+      if (form.is_delta && data.applied_delta !== undefined) {
+        setLastAppliedDelta({
+          delta: data.applied_delta,
+          previous: data.previous_value,
+          total: data.snapshot.value_usd,
+        });
+      }
+
+      setForm({ ...emptyForm, type: form.type, is_delta: form.is_delta }); // сохраняем выбор типа и режима
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -115,14 +128,29 @@ export default function BalancePage() {
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">Сумма, $</label>
+            <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
+              Режим суммы
+            </label>
+            <select
+              value={form.is_delta ? "delta" : "total"}
+              onChange={(e) => updateField("is_delta", e.target.value === "delta")}
+              className="input"
+            >
+              <option value="total">Итог (абсолют)</option>
+              <option value="delta">Дельта (± изменение)</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
+              {form.is_delta ? "Изменение, $" : "Сумма, $"}
+            </label>
             <input
               value={form.value_usd}
               onChange={(e) => updateField("value_usd", e.target.value)}
               type="number"
               step="0.01"
-              min="0"
-              placeholder="1000.00"
+              placeholder={form.is_delta ? "+200 или -50" : "1000.00"}
               className="input font-mono-tabular"
               inputMode="decimal"
             />
@@ -137,17 +165,40 @@ export default function BalancePage() {
               className="input font-mono-tabular"
             />
           </div>
-
-          <div className="flex flex-col gap-1.5">
-            <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">Заметка</label>
-            <input
-              value={form.note}
-              onChange={(e) => updateField("note", e.target.value)}
-              placeholder="необязательно"
-              className="input"
-            />
-          </div>
         </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">Заметка</label>
+          <input
+            value={form.note}
+            onChange={(e) => updateField("note", e.target.value)}
+            placeholder="необязательно"
+            className="input"
+          />
+        </div>
+
+        {/* Подсказка по режиму */}
+        <div className="text-xs text-[var(--color-text-faint)]">
+          {form.is_delta ? (
+            <>
+              <strong>Дельта:</strong> введите изменение от предыдущего баланса.
+              Например, <code className="font-mono-tabular">+200</code> = пополнили на $200,
+              итог = предыдущий + 200. Первая точка должна быть в режиме «Итог».
+            </>
+          ) : (
+            <>
+              <strong>Итог:</strong> введите полную текущую сумму.
+              Например, <code className="font-mono-tabular">1500</code> = у вас сейчас $1500 на споте.
+            </>
+          )}
+        </div>
+
+        {/* Подтверждение после сохранения в режиме дельты */}
+        {lastAppliedDelta && (
+          <div className="text-xs font-mono-tabular text-[var(--color-profit)] bg-[var(--color-profit-dim)] px-3 py-2 rounded">
+            ✓ Применено: ${lastAppliedDelta.previous.toLocaleString("ru-RU")} + ${lastAppliedDelta.delta.toLocaleString("ru-RU")} = ${lastAppliedDelta.total.toLocaleString("ru-RU")}
+          </div>
+        )}
 
         {error && <div className="text-sm text-[var(--color-loss)]">{error}</div>}
 
