@@ -1,0 +1,2225 @@
+From d1aec80ea0cb1760a905f8fc44f2090cdc09614c Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Sat, 11 Jul 2026 19:09:11 +0000
+Subject: [PATCH] feat: add Binance, Bitget, BingX, MEXC exchanges + fix Bybit
+ fee display
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Поддержка 4 новых бирж через общий интерфейс адаптера. Плюс фикс бага
+с нулевой комиссией Bybit в UI.
+
+## Рефакторинг архитектуры (lib/exchanges/)
+
+- lib/exchanges/types.ts (новый): интерфейс ExchangeAdapter с методами
+  fetchClosedTrades и testCredentials. Тип Exchange объявлен ЗДЕСЬ, чтобы
+  избежать циклического импорта. credentialsSchema: 'key+secret' |
+  'key+secret+passphrase' | 'key+privatekey' — определяет, какие поля
+  рендерить в форме подключения.
+- lib/exchanges/index.ts (новый): реестр REGISTRY и массив EXCHANGES.
+  При добавлении биржи нужно: добавить в массив + реализовать адаптер +
+  добавить в REGISTRY + в Exchange union + в CHECK constraint БД.
+- bybit.ts, bitunix.ts: переписаны под интерфейс ExchangeAdapter.
+  Нарезка 7-дневных окон (Bybit) и цикл по символам (Bitunix) перенесены
+  из route handler в адаптер — где им и место.
+
+## 4 новых адаптера
+
+- binance.ts: /fapi/v1/income (REALIZED_PNL/COMMISSION/FUNDING_FEE) +
+  /fapi/v1/userTrades. PnL НЕ включает комиссию — тянем отдельным запросом.
+  Группируем по orderId. Подпись HMAC-SHA256.
+- bitget.ts: /api/v2/mix/position/history-position, USDT-FUTURES.
+  Подпись HMAC-SHA256 с base64 (как OKX), требует passphrase. Timestamp
+  берётся с сервера Bitget, чтобы избежать рассинхрона.
+- bingx.ts: /openApi/swap/v2/user/positions/history. Пагинация по
+  pageNum/pageSize. Возвращает готовые fee, fundingFee, realizedPNL.
+- mexc.ts: /api/v1/private/position/list/history-position. Пагинация
+  pageNum/pageSize. positionType: 1=Long, 2=Short.
+
+## Фикс бага Bybit fee=0 в UI
+
+Bybit V5 /v5/position/closed-pnl документированно НЕ возвращает fee —
+комиссия уже вычтена из closedPnl. Раньше в UI показывалось '0', что
+выглядело как баг. Теперь в app/trades/page.tsx для Bybit сделок с fee=0
+показывается '—' с комментарием в коде. Полноценный фикс требует отдельного
+эндпоинта /v5/account/transaction-log (TODO, см. README).
+
+## Динамический sync-роут
+
+- Удалены app/api/sync/bybit/route.ts и bitunix/route.ts
+- Создан app/api/sync/[exchange]/route.ts — один route handler для всех
+  бирж. Берёт адаптер из REGISTRY[params.exchange] и вызывает его в цикле
+  с пагинацией. При добавлении биржи не нужно создавать новый route.
+
+## БД-миграция (supabase/migration_04_new_exchanges.sql)
+
+- Расширен CHECK constraint на trades: добавлены binance, bitget, bingx, mexc
+- То же на exchange_connections
+- Добавлена колонка passphrase_encrypted (для Bitget, OKX, KuCoin).
+  Для бирж без passphrase остаётся NULL.
+
+## UI
+
+- app/page.tsx: кнопки синка генерируются из EXCHANGES (было 2, стало 6)
+- app/trades/page.tsx: фильтр по биржам из EXCHANGES, имя биржи из
+  REGISTRY[ex].label. Фикс fmtFee — '—' для Bybit fee=0.
+- app/connections/page.tsx: форма рендерится по credentialsSchema адаптера.
+  Для Bitget автоматически показывается третье поле passphrase.
+- app/api/connections/route.ts: валидация через isValidExchange, поддержка
+  passphrase в теле запроса, шифрование passphrase_encrypted.
+
+## vercel.json
+
+Cron-задачи добавлены для всех 6 бирж (по одной на биржу, раз в сутки).
+На Vercel Pro можно увеличить частоту до каждых 15 минут.
+---
+ .env.example                            |   1 +
+ README.md                               |   6 +-
+ app/api/connections/route.ts            |  55 +++++--
+ app/api/sync/[exchange]/route.ts        | 125 ++++++++++++++
+ app/api/sync/bitunix/route.ts           |  93 -----------
+ app/api/sync/bybit/route.ts             | 101 ------------
+ app/connections/page.tsx                |  65 ++++++--
+ app/page.tsx                            |  34 ++--
+ app/trades/page.tsx                     |  21 ++-
+ lib/exchanges/binance.ts                | 208 ++++++++++++++++++++++++
+ lib/exchanges/bingx.ts                  | 135 +++++++++++++++
+ lib/exchanges/bitget.ts                 | 182 +++++++++++++++++++++
+ lib/exchanges/bitunix.ts                | 124 +++++++++-----
+ lib/exchanges/bybit.ts                  | 145 +++++++++++------
+ lib/exchanges/index.ts                  |  69 ++++++++
+ lib/exchanges/mexc.ts                   | 131 +++++++++++++++
+ lib/exchanges/types.ts                  |  97 +++++++++++
+ lib/sync.ts                             |  23 ++-
+ lib/types.ts                            |   8 +-
+ supabase/migration_04_new_exchanges.sql |  34 ++++
+ vercel.json                             |   6 +-
+ 21 files changed, 1317 insertions(+), 346 deletions(-)
+ create mode 100644 app/api/sync/[exchange]/route.ts
+ delete mode 100644 app/api/sync/bitunix/route.ts
+ delete mode 100644 app/api/sync/bybit/route.ts
+ create mode 100644 lib/exchanges/binance.ts
+ create mode 100644 lib/exchanges/bingx.ts
+ create mode 100644 lib/exchanges/bitget.ts
+ create mode 100644 lib/exchanges/index.ts
+ create mode 100644 lib/exchanges/mexc.ts
+ create mode 100644 lib/exchanges/types.ts
+ create mode 100644 supabase/migration_04_new_exchanges.sql
+
+diff --git a/.env.example b/.env.example
+index 53e23a8..ed7e574 100644
+--- a/.env.example
++++ b/.env.example
+@@ -30,6 +30,7 @@ ENCRYPTION_KEY=
+ 
+ # API-ключи бирж теперь вводятся через UI (страница "Подключения") и хранятся
+ # зашифрованными в БД — сюда их вписывать больше не нужно.
++# Для бирж с ключ+secret+passphrase (Bitget) passphrase тоже вводится в UI.
+ 
+ # Список торгуемых символов Bitunix через запятую — можно оставить пустым,
+ # тогда синк пойдёт по всем символам сразу (см. README)
+diff --git a/README.md b/README.md
+index 69885f5..3dccd21 100644
+--- a/README.md
++++ b/README.md
+@@ -59,7 +59,11 @@ https://твой-домен.vercel.app/api/sync/bybit?days=730
+ 
+ - **Bybit**: `/v5/position/closed-pnl`, категория `linear` (USDT-перпетуалы). Подпись — стандартный HMAC-SHA256. `closedPnl` в ответе уже учитывает комиссию, поэтому `fee` в БД пишется как 0, чтобы не задваивать вычет — если увидишь расхождение с реальным балансом, можно поправить в `lib/exchanges/bybit.ts`.
+ - **Bitunix**: `/api/v1/futures/position/get_history_positions`. Подпись своя (двойной SHA-256 с nonce), детали в `lib/exchanges/bitunix.ts`. Если API требует `symbol` обязательным параметром — список тикеров задаётся через `BITUNIX_SYMBOLS` в `.env`.
+-- Оба клиента писались по официальной документации на момент создания проекта (июль 2026) — перед боевым использованием стоит прогнать один тестовый синк и свериться вручную с 2-3 сделками, т.к. биржи периодически меняют формат ответов.
++- **Binance**: `/fapi/v1/income` (REALIZED_PNL/COMMISSION/FUNDING_FEE) + `/fapi/v1/userTrades`. Подпись — HMAC-SHA256. PnL не включает комиссию, поэтому `fee` тянется отдельным запросом.
++- **Bitget**: `/api/v2/mix/position/history-position`, productType=USDT-FUTURES. Подпись HMAC-SHA256 с base64 (как у OKX), требует **passphrase** — третье поле в форме подключения. Timestamp берётся с сервера Bitget.
++- **BingX**: `/openApi/swap/v2/user/positions/history`. Подпись HMAC-SHA256 (как Binance). Пагинация по pageNum/pageSize. Возвращает готовые fee, fundingFee, realizedPNL.
++- **MEXC**: `/api/v1/private/position/list/history-position`. Подпись HMAC-SHA256. Пагинация по pageNum/pageSize. positionType: 1=Long, 2=Short.
++- Все клиенты писались по официальной документации на момент создания проекта (июль 2026) — перед боевым использованием стоит прогнать один тестовый синк и свериться вручную с 2-3 сделками, т.к. биржи периодически меняют формат ответов.
+ 
+ ## Авторизация через Google (шаг 1 из плана мультитенантности)
+ 
+diff --git a/app/api/connections/route.ts b/app/api/connections/route.ts
+index cd9cea3..947ed83 100644
+--- a/app/api/connections/route.ts
++++ b/app/api/connections/route.ts
+@@ -1,8 +1,7 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createServerSupabaseClient } from "@/lib/supabase-server";
+ import { encrypt, maskKey } from "@/lib/crypto";
+-import { testBybitCredentials } from "@/lib/exchanges/bybit";
+-import { testBitunixCredentials } from "@/lib/exchanges/bitunix";
++import { REGISTRY, isValidExchange, getExchangeList } from "@/lib/exchanges";
+ 
+ // Список подключений — специально выбираем только безопасные колонки.
+ // Даже случайно не отдадим *_encrypted наружу.
+@@ -23,7 +22,7 @@ export async function GET() {
+ 
+     return NextResponse.json({ connections: data });
+   } catch (err) {
+-    console.error("Connections list error", err);
++    console.error("Connections list error:", err instanceof Error ? err.message : String(err));
+     return NextResponse.json(
+       { error: err instanceof Error ? err.message : String(err) },
+       { status: 500 }
+@@ -42,10 +41,11 @@ export async function POST(req: NextRequest) {
+     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+ 
+     const body = await req.json();
+-    const { exchange, apiKey, apiSecret } = body as {
+-      exchange: "bybit" | "bitunix";
++    const { exchange, apiKey, apiSecret, passphrase } = body as {
++      exchange: string;
+       apiKey: string;
+       apiSecret: string;
++      passphrase?: string;
+     };
+ 
+     if (!exchange || !apiKey || !apiSecret) {
+@@ -54,22 +54,34 @@ export async function POST(req: NextRequest) {
+         { status: 400 }
+       );
+     }
+-    if (!["bybit", "bitunix"].includes(exchange)) {
++    if (!isValidExchange(exchange)) {
+       return NextResponse.json({ error: "Неизвестная биржа" }, { status: 400 });
+     }
+ 
++    const adapter = REGISTRY[exchange];
++
++    // Для бирж с passphrase-схемой проверяем, что passphrase передан.
++    if (adapter.credentialsSchema === "key+secret+passphrase" && !passphrase) {
++      return NextResponse.json(
++        { error: `${adapter.label} требует passphrase — укажите третье поле` },
++        { status: 400 }
++      );
++    }
++
++    const credentials = {
++      apiKey,
++      apiSecret,
++      ...(passphrase ? { passphrase } : {}),
++    };
++
+     // Проверяем ключ перед сохранением — иначе узнаешь о невалидном ключе
+     // только когда упадёт синк по крону
+     try {
+-      if (exchange === "bybit") {
+-        await testBybitCredentials({ apiKey, apiSecret });
+-      } else {
+-        await testBitunixCredentials({ apiKey, apiSecret });
+-      }
++      await adapter.testCredentials(credentials);
+     } catch (testErr) {
+       return NextResponse.json(
+         {
+-          error: `Не удалось подключиться к бирже с этим ключом: ${
++          error: `Не удалось подключиться к ${adapter.label} с этим ключом: ${
+             testErr instanceof Error ? testErr.message : String(testErr)
+           }`,
+         },
+@@ -77,7 +89,7 @@ export async function POST(req: NextRequest) {
+       );
+     }
+ 
+-    const row = {
++    const row: Record<string, unknown> = {
+       user_id: user.id,
+       exchange,
+       api_key_encrypted: encrypt(apiKey),
+@@ -86,6 +98,15 @@ export async function POST(req: NextRequest) {
+       updated_at: new Date().toISOString(),
+     };
+ 
++    // Для бирж с passphrase — сохраняем отдельной зашифрованной колонкой.
++    if (passphrase) {
++      row.passphrase_encrypted = encrypt(passphrase);
++    } else {
++      // Если юзер переподключает биржу, которая раньше имела passphrase, а теперь нет —
++      // затираем старую. (На практике так не бывает, но defensively.)
++      row.passphrase_encrypted = null;
++    }
++
+     const { error } = await supabase
+       .from("exchange_connections")
+       .upsert(row, { onConflict: "user_id,exchange" });
+@@ -93,10 +114,16 @@ export async function POST(req: NextRequest) {
+ 
+     return NextResponse.json({ ok: true });
+   } catch (err) {
+-    console.error("Connection create error", err);
++    console.error("Connection create error:", err instanceof Error ? err.message : String(err));
+     return NextResponse.json(
+       { error: err instanceof Error ? err.message : String(err) },
+       { status: 500 }
+     );
+   }
+ }
++
++// GET-эндпоинт для UI: отдаёт список поддерживаемых бирж с их схемой credentials.
++// Используется формой подключения, чтобы знать, какие поля рендерить.
++export async function LIST() {
++  return NextResponse.json({ exchanges: getExchangeList() });
++}
+diff --git a/app/api/sync/[exchange]/route.ts b/app/api/sync/[exchange]/route.ts
+new file mode 100644
+index 0000000..d6bda90
+--- /dev/null
++++ b/app/api/sync/[exchange]/route.ts
+@@ -0,0 +1,125 @@
++import { NextRequest, NextResponse } from "next/server";
++import { getSupabaseServerClient } from "@/lib/supabase";
++import { authenticateSyncRequest } from "@/lib/auth";
++import { getSyncTargets, syncAllUsers, summarizeResults } from "@/lib/sync";
++import { REGISTRY, isValidExchange } from "@/lib/exchanges";
++
++export const maxDuration = 60;
++
++/**
++ * Динамический sync-роут: /api/sync/[exchange]
++ *
++ * Заменяет старые статические /api/sync/bybit и /api/sync/bitunix.
++ * При добавлении новой биржи не надо создавать новый route handler —
++ * достаточно зарегистрировать адаптер в lib/exchanges/index.ts.
++ *
++ * Авторизация:
++ *   - Vercel cron (Bearer $CRON_SECRET) — синкаем ВСЕХ пользователей
++ *   - Залогиненный пользователь — синкаем ТОЛЬКО его подключение
++ *
++ * Параметры:
++ *   - days: на сколько дней назад копать (по умолчанию 365). Только для Bybit
++ *     и других бирж с windowed API — остальные адаптеры сами решают, как
++ *     интерпретировать sinceMs/untilMs.
++ */
++export async function GET(
++  req: NextRequest,
++  { params }: { params: Promise<{ exchange: string }> }
++) {
++  try {
++    const { exchange } = await params;
++
++    // Валидация: биржа должна быть в реестре.
++    if (!isValidExchange(exchange)) {
++      return NextResponse.json(
++        { ok: false, error: `Неизвестная биржа: ${exchange}` },
++        { status: 404 }
++      );
++    }
++
++    const adapter = REGISTRY[exchange];
++
++    // Авторизация: cron (синк всех) или user (только своё подключение).
++    const auth = await authenticateSyncRequest(req);
++    if ("error" in auth) return auth.error;
++
++    // Список подключений, которые нужно просинкать в этом запуске.
++    const targets = await getSyncTargets(exchange, auth);
++    if (targets.length === 0) {
++      return NextResponse.json({
++        ok: true,
++        processed: 0,
++        upserted: 0,
++        message:
++          auth.mode === "user"
++            ? `${adapter.label} не подключён — добавь ключ на странице 'Подключения' перед синком`
++            : `Нет подключений к ${adapter.label} ни у одного пользователя`,
++      });
++    }
++
++    // ?days=N — на сколько дней назад копать (для Bybit и других с windowed API).
++    const daysParam = req.nextUrl.searchParams.get("days");
++    const days = daysParam ? Number(daysParam) : 365;
++    const now = Date.now();
++    const sinceMs = now - days * 24 * 60 * 60 * 1000;
++
++    // Цикл по всем целям. Ошибки изолированы: если у одного пользователя
++    // ключ стал невалидным, остальные всё равно просинкаются.
++    const results = await syncAllUsers(targets, async ({ userId, credentials }) => {
++      const supabase = getSupabaseServerClient();
++      let userUpserted = 0;
++      let cursor: string | undefined;
++
++      // Адаптер сам отвечает за пагинацию — вызываем его в цикле, пока
++      // nextCursor !== null. Большинство адаптеров возвращает nextCursor=null
++      // сразу (проходят все страницы внутри одного вызова), но Bybit
++      // потенциально может вернуть курсор для продолжения.
++      for (let page = 0; page < 100; page++) {
++        const { trades, nextCursor } = await adapter.fetchClosedTrades(credentials, {
++          sinceMs,
++          untilMs: now,
++          cursor,
++        });
++
++        if (trades.length > 0) {
++          const rows = trades.map((t) => ({ ...t, user_id: userId }));
++          const { error } = await supabase
++            .from("trades")
++            .upsert(rows, { onConflict: "user_id,exchange,external_id" });
++          if (error) throw error;
++          userUpserted += trades.length;
++        }
++
++        if (!nextCursor) break;
++        cursor = nextCursor;
++      }
++      return userUpserted;
++    });
++
++    const summary = summarizeResults(results);
++
++    // Для ручного запуска с дашборда: показываем человекочитаемую ошибку,
++    // если у текущего пользователя синк упал.
++    let userError: string | undefined;
++    if (auth.mode === "user") {
++      const userResult = results.find((r) => r.userId === auth.userId);
++      if (userResult?.error) userError = userResult.error;
++    }
++
++    return NextResponse.json({
++      ok: summary.failed === 0,
++      mode: auth.mode,
++      exchange,
++      ...summary,
++      ...(userError ? { error: userError } : {}),
++    });
++  } catch (err) {
++    // Логируем только сообщение, без полного объекта — в err может быть
++    // URL запроса с подписью, которое не должно попадать в логи Vercel.
++    console.error(`Sync error:`, err instanceof Error ? err.message : String(err));
++    return NextResponse.json(
++      { ok: false, error: err instanceof Error ? err.message : String(err) },
++      { status: 500 }
++    );
++  }
++}
+diff --git a/app/api/sync/bitunix/route.ts b/app/api/sync/bitunix/route.ts
+deleted file mode 100644
+index 3a90588..0000000
+--- a/app/api/sync/bitunix/route.ts
++++ /dev/null
+@@ -1,93 +0,0 @@
+-import { NextRequest, NextResponse } from "next/server";
+-import { getSupabaseServerClient } from "@/lib/supabase";
+-import { fetchBitunixHistoryPositions } from "@/lib/exchanges/bitunix";
+-import { authenticateSyncRequest } from "@/lib/auth";
+-import { getSyncTargets, syncAllUsers, summarizeResults } from "@/lib/sync";
+-
+-export const maxDuration = 60;
+-
+-export async function GET(req: NextRequest) {
+-  try {
+-    // Авторизация: Vercel cron (Bearer CRON_SECRET) — синкаем всех,
+-    // либо залогиненный пользователь — синкаем только его подключение.
+-    const auth = await authenticateSyncRequest(req);
+-    if ("error" in auth) return auth.error;
+-
+-    // Список подключений к Bitunix, которые нужно просинкать в этом запуске.
+-    const targets = await getSyncTargets("bitunix", auth);
+-    if (targets.length === 0) {
+-      return NextResponse.json({
+-        ok: true,
+-        processed: 0,
+-        upserted: 0,
+-        message:
+-          auth.mode === "user"
+-            ? "Bitunix не подключён — добавь ключ на странице 'Подключения' перед синком"
+-            : "Нет подключений к Bitunix ни у одного пользователя",
+-      });
+-    }
+-
+-    // Список торгуемых символов задаём через env (BITUNIX_SYMBOLS=BTCUSDT,ETHUSDT),
+-    // т.к. get_history_positions на многих аккаунтах требует symbol в запросе.
+-    // Если у тебя API отдаёт все символы разом без фильтра — оставь
+-    // BITUNIX_SYMBOLS пустым, тогда запрос уйдёт без symbol.
+-    //
+-    // NOTE: список символов пока общий для всех пользователей. Если у разных
+-    // юзеров разные торгуемые пары — это шаг 5 дорожной карты (per-user symbols).
+-    const symbolsEnv = process.env.BITUNIX_SYMBOLS?.trim();
+-    const symbols = symbolsEnv ? symbolsEnv.split(",").map((s) => s.trim()) : [undefined];
+-
+-    // Цикл по всем целям. Ошибки изолированы: если у одного пользователя
+-    // ключ стал невалидным, остальные всё равно просинкаются.
+-    const results = await syncAllUsers(targets, async ({ userId, credentials }) => {
+-      const supabase = getSupabaseServerClient();
+-      let userUpserted = 0;
+-
+-      for (const symbol of symbols) {
+-        let skip = 0;
+-        const limit = 100;
+-
+-        for (let page = 0; page < 20; page++) {
+-          const trades = await fetchBitunixHistoryPositions(credentials, { symbol, skip, limit });
+-          if (trades.length === 0) break;
+-
+-          const rows = trades.map((t) => ({ ...t, user_id: userId }));
+-          const { error } = await supabase
+-            .from("trades")
+-            .upsert(rows, { onConflict: "user_id,exchange,external_id" });
+-          if (error) throw error;
+-
+-          userUpserted += trades.length;
+-          if (trades.length < limit) break;
+-          skip += limit;
+-        }
+-      }
+-      return userUpserted;
+-    });
+-
+-    const summary = summarizeResults(results);
+-
+-    // Для ручного запуска с дашборда: показываем человекочитаемую ошибку,
+-    // если у текущего пользователя синк упал.
+-    let userError: string | undefined;
+-    if (auth.mode === "user") {
+-      const userResult = results.find((r) => r.userId === auth.userId);
+-      if (userResult?.error) userError = userResult.error;
+-    }
+-
+-    return NextResponse.json({
+-      ok: summary.failed === 0,
+-      mode: auth.mode,
+-      ...summary,
+-      ...(userError ? { error: userError } : {}),
+-    });
+-  } catch (err) {
+-    // Логируем только сообщение, без полного объекта — в err может быть
+-    // URL запроса с подписью, которое не должно попадать в логи Vercel.
+-    console.error("Bitunix sync error:", err instanceof Error ? err.message : String(err));
+-    return NextResponse.json(
+-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+-      { status: 500 }
+-    );
+-  }
+-}
+diff --git a/app/api/sync/bybit/route.ts b/app/api/sync/bybit/route.ts
+deleted file mode 100644
+index f4fb5d1..0000000
+--- a/app/api/sync/bybit/route.ts
++++ /dev/null
+@@ -1,101 +0,0 @@
+-import { NextRequest, NextResponse } from "next/server";
+-import { getSupabaseServerClient } from "@/lib/supabase";
+-import { fetchBybitClosedPnl } from "@/lib/exchanges/bybit";
+-import { authenticateSyncRequest } from "@/lib/auth";
+-import { getSyncTargets, syncAllUsers, summarizeResults } from "@/lib/sync";
+-
+-export const maxDuration = 60;
+-
+-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+-
+-export async function GET(req: NextRequest) {
+-  try {
+-    // Авторизация: Vercel cron (Bearer CRON_SECRET) — синкаем всех,
+-    // либо залогиненный пользователь — синкаем только его подключение.
+-    const auth = await authenticateSyncRequest(req);
+-    if ("error" in auth) return auth.error;
+-
+-    // Список подключений к Bybit, которые нужно просинкать в этом запуске.
+-    const targets = await getSyncTargets("bybit", auth);
+-    if (targets.length === 0) {
+-      return NextResponse.json({
+-        ok: true,
+-        processed: 0,
+-        upserted: 0,
+-        message:
+-          auth.mode === "user"
+-            ? "Bybit не подключён — добавь ключ на странице 'Подключения' перед синком"
+-            : "Нет подключений к Bybit ни у одного пользователя",
+-      });
+-    }
+-
+-    // Bybit ограничивает closed-pnl диапазоном endTime-startTime <= 7 дней,
+-    // а без startTime/endTime отдаёт только последние 24 часа. Поэтому
+-    // нарезаем весь запрошенный период на 7-дневные окна и проходим их все.
+-    // ?days=N — на сколько дней назад копать (по умолчанию — год).
+-    const daysParam = req.nextUrl.searchParams.get("days");
+-    const days = daysParam ? Number(daysParam) : 365;
+-    const now = Date.now();
+-    const rangeStart = now - days * 24 * 60 * 60 * 1000;
+-
+-    // Цикл по всем целям. Ошибки изолированы: если у одного пользователя
+-    // ключ стал невалидным, остальные всё равно просинкаются.
+-    const results = await syncAllUsers(targets, async ({ userId, credentials }) => {
+-      const supabase = getSupabaseServerClient();
+-      let userUpserted = 0;
+-
+-      for (let windowEnd = now; windowEnd > rangeStart; windowEnd -= SEVEN_DAYS_MS) {
+-        const windowStart = Math.max(windowEnd - SEVEN_DAYS_MS, rangeStart);
+-        let cursor: string | undefined;
+-
+-        // Пагинация курсором внутри одного 7-дневного окна (на случай, если
+-        // сделок за неделю окажется больше 100)
+-        for (let page = 0; page < 10; page++) {
+-          const { trades, nextCursor } = await fetchBybitClosedPnl(credentials, {
+-            cursor,
+-            startTimeMs: windowStart,
+-            endTimeMs: windowEnd,
+-          });
+-
+-          if (trades.length > 0) {
+-            const rows = trades.map((t) => ({ ...t, user_id: userId }));
+-            const { error } = await supabase
+-              .from("trades")
+-              .upsert(rows, { onConflict: "user_id,exchange,external_id" });
+-            if (error) throw error;
+-            userUpserted += trades.length;
+-          }
+-
+-          if (!nextCursor) break;
+-          cursor = nextCursor;
+-        }
+-      }
+-      return userUpserted;
+-    });
+-
+-    const summary = summarizeResults(results);
+-
+-    // Для ручного запуска с дашборда: показываем человекочитаемую ошибку,
+-    // если у текущего пользователя синк упал.
+-    let userError: string | undefined;
+-    if (auth.mode === "user") {
+-      const userResult = results.find((r) => r.userId === auth.userId);
+-      if (userResult?.error) userError = userResult.error;
+-    }
+-
+-    return NextResponse.json({
+-      ok: summary.failed === 0,
+-      mode: auth.mode,
+-      ...summary,
+-      ...(userError ? { error: userError } : {}),
+-    });
+-  } catch (err) {
+-    // Логируем только сообщение, без полного объекта — в err может быть
+-    // URL запроса с подписью, которое не должно попадать в логи Vercel.
+-    console.error("Bybit sync error:", err instanceof Error ? err.message : String(err));
+-    return NextResponse.json(
+-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+-      { status: 500 }
+-    );
+-  }
+-}
+diff --git a/app/connections/page.tsx b/app/connections/page.tsx
+index 274b771..9a7097c 100644
+--- a/app/connections/page.tsx
++++ b/app/connections/page.tsx
+@@ -1,24 +1,21 @@
+ "use client";
+ 
+ import { useEffect, useState, useCallback } from "react";
++import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+ 
+ interface Connection {
+-  exchange: "bybit" | "bitunix";
++  exchange: (typeof EXCHANGES)[number];
+   key_preview: string;
+   created_at: string;
+ }
+ 
+-const EXCHANGES: { id: "bybit" | "bitunix"; label: string }[] = [
+-  { id: "bybit", label: "Bybit" },
+-  { id: "bitunix", label: "Bitunix" },
+-];
+-
+ export default function ConnectionsPage() {
+   const [connections, setConnections] = useState<Connection[]>([]);
+   const [loading, setLoading] = useState(true);
+-  const [formExchange, setFormExchange] = useState<"bybit" | "bitunix">("bybit");
++  const [formExchange, setFormExchange] = useState<(typeof EXCHANGES)[number]>("bybit");
+   const [apiKey, setApiKey] = useState("");
+   const [apiSecret, setApiSecret] = useState("");
++  const [passphrase, setPassphrase] = useState("");
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState<string | null>(null);
+ 
+@@ -34,21 +31,36 @@ export default function ConnectionsPage() {
+     load();
+   }, [load]);
+ 
++  function selectExchange(ex: (typeof EXCHANGES)[number]) {
++    setFormExchange(ex);
++    setError(null);
++  }
++
+   async function submit(e: React.FormEvent) {
+     e.preventDefault();
+     setError(null);
+     setSaving(true);
+     try {
++      const body: Record<string, string> = {
++        exchange: formExchange,
++        apiKey,
++        apiSecret,
++      };
++      if (REGISTRY[formExchange].credentialsSchema === "key+secret+passphrase") {
++        body.passphrase = passphrase;
++      }
++
+       const res = await fetch("/api/connections", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify({ exchange: formExchange, apiKey, apiSecret }),
++        body: JSON.stringify(body),
+       });
+       const data = await res.json();
+       if (!res.ok) throw new Error(data.error ?? "Ошибка сохранения");
+ 
+       setApiKey("");
+       setApiSecret("");
++      setPassphrase("");
+       await load();
+     } catch (e) {
+       setError(e instanceof Error ? e.message : String(e));
+@@ -64,6 +76,8 @@ export default function ConnectionsPage() {
+   }
+ 
+   const connectedExchanges = new Set(connections.map((c) => c.exchange));
++  const currentAdapter = REGISTRY[formExchange];
++  const needsPassphrase = currentAdapter.credentialsSchema === "key+secret+passphrase";
+ 
+   return (
+     <div className="max-w-2xl mx-auto flex flex-col gap-8">
+@@ -80,7 +94,8 @@ export default function ConnectionsPage() {
+           <div className="text-sm text-[var(--color-text-faint)]">Загрузка...</div>
+         )}
+         {!loading &&
+-          EXCHANGES.map(({ id, label }) => {
++          EXCHANGES.map((id) => {
++            const adapter = REGISTRY[id];
+             const conn = connections.find((c) => c.exchange === id);
+             return (
+               <div
+@@ -88,7 +103,10 @@ export default function ConnectionsPage() {
+                 className="flex items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3"
+               >
+                 <div className="flex items-center gap-3">
+-                  <span className="text-sm">{label}</span>
++                  <span className="text-sm">{adapter.label}</span>
++                  {adapter.credentialsSchema === "key+secret+passphrase" && (
++                    <span className="text-xs text-[var(--color-text-faint)]">+ passphrase</span>
++                  )}
+                   {conn ? (
+                     <span className="text-xs font-mono-tabular text-[var(--color-profit)]">
+                       подключено · {conn.key_preview}
+@@ -124,12 +142,12 @@ export default function ConnectionsPage() {
+           </label>
+           <select
+             value={formExchange}
+-            onChange={(e) => setFormExchange(e.target.value as "bybit" | "bitunix")}
++            onChange={(e) => selectExchange(e.target.value as (typeof EXCHANGES)[number])}
+             className="input"
+           >
+-            {EXCHANGES.map(({ id, label }) => (
++            {EXCHANGES.map((id) => (
+               <option key={id} value={id}>
+-                {label}
++                {REGISTRY[id].label}
+               </option>
+             ))}
+           </select>
+@@ -160,11 +178,30 @@ export default function ConnectionsPage() {
+           />
+         </div>
+ 
++        {needsPassphrase && (
++          <div className="flex flex-col gap-1.5">
++            <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
++              Passphrase
++            </label>
++            <input
++              value={passphrase}
++              onChange={(e) => setPassphrase(e.target.value)}
++              type="password"
++              className="input font-mono-tabular"
++              autoComplete="off"
++            />
++            <span className="text-xs text-[var(--color-text-faint)]">
++              {currentAdapter.label} требует третье поле — passphrase, который вы задали при
++              создании API-ключа на бирже.
++            </span>
++          </div>
++        )}
++
+         {error && <div className="text-sm text-[var(--color-loss)]">{error}</div>}
+ 
+         <button
+           type="submit"
+-          disabled={saving || !apiKey || !apiSecret}
++          disabled={saving || !apiKey || !apiSecret || (needsPassphrase && !passphrase)}
+           className="px-4 py-2 rounded-md bg-[var(--color-accent)] text-white text-sm disabled:opacity-50 self-start"
+         >
+           {saving ? "Проверка ключа..." : "Сохранить"}
+diff --git a/app/page.tsx b/app/page.tsx
+index 6dc0f1e..16e0f24 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -12,6 +12,7 @@ import {
+   Cell,
+ } from "recharts";
+ import type { MonthlySummary, Trade } from "@/lib/types";
++import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+ 
+ function fmt(n: number): string {
+   return n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+@@ -37,7 +38,6 @@ export default function DashboardPage() {
+   const [loading, setLoading] = useState(true);
+   const [syncing, setSyncing] = useState<string | null>(null);
+   const [syncMsg, setSyncMsg] = useState<string | null>(null);
+-
+   const load = useCallback(async () => {
+     setLoading(true);
+     const res = await fetch("/api/trades?limit=500");
+@@ -61,17 +61,17 @@ export default function DashboardPage() {
+     load();
+   }, [load]);
+ 
+-  async function runSync(exchange: "bybit" | "bitunix") {
++  async function runSync(exchange: (typeof EXCHANGES)[number]) {
+     setSyncing(exchange);
+     setSyncMsg(null);
+     try {
+       const res = await fetch(`/api/sync/${exchange}`);
+       const data = await res.json();
+       if (!res.ok || !data.ok) throw new Error(data.error ?? "Неизвестная ошибка");
+-      setSyncMsg(`${exchange}: обновлено ${data.upserted} записей`);
++      setSyncMsg(`${REGISTRY[exchange].label}: обновлено ${data.upserted} записей`);
+       await load();
+     } catch (e) {
+-      setSyncMsg(`${exchange}: ошибка — ${e instanceof Error ? e.message : String(e)}`);
++      setSyncMsg(`${REGISTRY[exchange].label}: ошибка — ${e instanceof Error ? e.message : String(e)}`);
+     } finally {
+       setSyncing(null);
+     }
+@@ -108,21 +108,17 @@ export default function DashboardPage() {
+             <PnlValue value={totalNet} />
+           </div>
+         </div>
+-        <div className="flex gap-3">
+-          <button
+-            onClick={() => runSync("bybit")}
+-            disabled={syncing !== null}
+-            className="px-4 py-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-sm disabled:opacity-50"
+-          >
+-            {syncing === "bybit" ? "Синк..." : "Синк Bybit"}
+-          </button>
+-          <button
+-            onClick={() => runSync("bitunix")}
+-            disabled={syncing !== null}
+-            className="px-4 py-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-sm disabled:opacity-50"
+-          >
+-            {syncing === "bitunix" ? "Синк..." : "Синк Bitunix"}
+-          </button>
++        <div className="flex gap-2 flex-wrap">
++          {EXCHANGES.map((ex) => (
++            <button
++              key={ex}
++              onClick={() => runSync(ex)}
++              disabled={syncing !== null}
++              className="px-3 py-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] text-sm disabled:opacity-50"
++            >
++              {syncing === ex ? "Синк..." : `Синк ${REGISTRY[ex].label}`}
++            </button>
++          ))}
+         </div>
+       </div>
+ 
+diff --git a/app/trades/page.tsx b/app/trades/page.tsx
+index bc326dd..e236582 100644
+--- a/app/trades/page.tsx
++++ b/app/trades/page.tsx
+@@ -2,12 +2,21 @@
+ 
+ import { useEffect, useState, useCallback } from "react";
+ import type { Trade, Exchange } from "@/lib/types";
++import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+ 
+ function fmt(n: number | null): string {
+   if (n === null) return "—";
+   return n.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
+ }
+ 
++function fmtFee(fee: number, exchange: Exchange): string {
++  // Bybit closedPnl уже включает комиссию, и в API её можно получить только
++  // через отдельный эндпоинт /v5/account/transaction-log. Пока показываем «—»,
++  // чтобы не вводить в заблуждение нулями. Это известное ограничение — TODO.
++  if (exchange === "bybit" && fee === 0) return "—";
++  return fmt(fee);
++}
++
+ function fmtDate(iso: string): string {
+   return new Date(iso).toLocaleString("ru-RU", {
+     day: "2-digit",
+@@ -80,8 +89,8 @@ export default function TradesPage() {
+ 
+   return (
+     <div className="max-w-6xl mx-auto flex flex-col gap-6">
+-      <div className="flex items-center gap-3">
+-        {(["all", "bybit", "bitunix", "manual"] as const).map((ex) => (
++      <div className="flex items-center gap-3 flex-wrap">
++        {(["all", ...EXCHANGES, "manual"] as const).map((ex) => (
+           <button
+             key={ex}
+             onClick={() => setFilter(ex)}
+@@ -91,7 +100,7 @@ export default function TradesPage() {
+                 : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+             }`}
+           >
+-            {ex === "all" ? "Все" : ex}
++            {ex === "all" ? "Все" : REGISTRY[ex as (typeof EXCHANGES)[number]]?.label ?? ex}
+           </button>
+         ))}
+       </div>
+@@ -123,7 +132,9 @@ export default function TradesPage() {
+                   <td className="px-4 py-2.5 font-mono-tabular text-[var(--color-text-muted)] whitespace-nowrap">
+                     {fmtDate(t.closed_at)}
+                   </td>
+-                  <td className="px-4 py-2.5 text-[var(--color-text-muted)]">{t.exchange}</td>
++                  <td className="px-4 py-2.5 text-[var(--color-text-muted)]">
++                    {t.exchange === "manual" ? "manual" : REGISTRY[t.exchange as (typeof EXCHANGES)[number]]?.label ?? t.exchange}
++                  </td>
+                   <td className="px-4 py-2.5 font-mono-tabular">{t.symbol}</td>
+                   <td className="px-4 py-2.5">
+                     <span
+@@ -137,7 +148,7 @@ export default function TradesPage() {
+                   <td className="px-4 py-2.5 text-right font-mono-tabular">{fmt(t.entry_price)}</td>
+                   <td className="px-4 py-2.5 text-right font-mono-tabular">{fmt(t.close_price)}</td>
+                   <td className="px-4 py-2.5 text-right font-mono-tabular text-[var(--color-text-muted)]">
+-                    {fmt(t.fee)}
++                    {fmtFee(t.fee, t.exchange)}
+                   </td>
+                   <td
+                     className={`px-4 py-2.5 text-right font-mono-tabular ${
+diff --git a/lib/exchanges/binance.ts b/lib/exchanges/binance.ts
+new file mode 100644
+index 0000000..550deb8
+--- /dev/null
++++ b/lib/exchanges/binance.ts
+@@ -0,0 +1,208 @@
++import crypto from "crypto";
++import type { SyncedTrade } from "../types";
++import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++
++const BASE_URL = "https://fapi.binance.com";
++
++interface BinanceIncomeItem {
++  symbol: string;
++  incomeType: "REALIZED_PNL" | "COMMISSION" | "FUNDING_FEE" | "TRANSFER" | "INTERNAL_TRANSFER" | string;
++  income: string;
++  asset: string;
++  time: number; // ms epoch
++  tranId: number;
++  tradeId: string;
++}
++
++interface BinanceIncomeResponse extends Array<BinanceIncomeItem> {}
++
++interface BinanceTradeItem {
++  symbol: string;
++  id: number;
++  orderId: number;
++  side: "BUY" | "SELL";
++  price: string;
++  qty: string;
++  realizedPnl: string;
++  marginAsset: string;
++  quoteQty: string;
++  commission: string;
++  commissionAsset: string;
++  time: number;
++  positionSide: "BOTH" | "LONG" | "SHORT";
++  buyer: boolean;
++  maker: boolean;
++}
++
++interface BinanceTradeResponse extends Array<BinanceTradeItem> {}
++
++function sign(queryString: string, secret: string): string {
++  return crypto.createHmac("sha256", secret).update(queryString).digest("hex");
++}
++
++async function signedGet<T>(
++  path: string,
++  params: Record<string, string>,
++  credentials: ExchangeCredentials
++): Promise<T> {
++  const { apiKey, apiSecret } = credentials;
++  const timestamp = Date.now().toString();
++  const allParams = { ...params, timestamp, recvWindow: "5000" };
++  const queryString = new URLSearchParams(allParams).toString();
++  const signature = sign(queryString, apiSecret);
++
++  const res = await fetch(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
++    method: "GET",
++    headers: { "X-MBX-APIKEY": apiKey },
++  });
++
++  if (!res.ok) {
++    const text = await res.text();
++    throw new Error(`Binance HTTP ${res.status}: ${text}`);
++  }
++
++  return (await res.json()) as T;
++}
++
++/**
++ * Binance USDS-M Futures: /fapi/v1/income + /fapi/v1/userTrades
++ *
++ * Особенности:
++ *   - У Binance нет отдельного эндпоинта "закрытые позиции". Вместо этого:
++ *     1. /fapi/v1/income с incomeType=REALIZED_PNL — даёт PnL по сделкам
++ *     2. /fapi/v1/income с incomeType=COMMISSION — комиссии
++ *     3. /fapi/v1/income с incomeType=FUNDING_FEE — фандинг
++ *     4. /fapi/v1/userTrades — детали (цена входа/выхода, qty, side)
++ *   - Совмещаем по orderId/tradeId, маппим в унифицированный SyncedTrade.
++ *   - startTime/endTime ограничены 7 днями для income, иначе ошибка.
++ *   - Пагинация по startTime — сдвигаем окно.
++ *
++ * Лимиты: 30000 weight/мин (по IP), каждый запрос = 20 weight. ~1500 req/мин.
++ *
++ * Регионы: блокирует US, Канада, часть ЕС. Нужен регион Vercel вне США
++ * (сейчас fra1 — подходит).
++ */
++async function fetchClosedTrades(
++  credentials: ExchangeCredentials,
++  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
++): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
++  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
++  const now = Date.now();
++  const until = opts?.untilMs ?? now;
++  const since = opts?.sinceMs ?? now - 365 * 24 * 60 * 60 * 1000;
++
++  const allTrades: SyncedTrade[] = [];
++
++  // Нарезаем на 7-дневные окна (как Bybit).
++  for (let windowEnd = until; windowEnd > since; windowEnd -= SEVEN_DAYS_MS) {
++    const windowStart = Math.max(windowEnd - SEVEN_DAYS_MS, since);
++    const limit = "1000";
++
++    // 1. REALIZED_PNL — даёт сделки с PnL
++    const pnlIncome = await signedGet<BinanceIncomeResponse>(
++      "/fapi/v1/income",
++      { incomeType: "REALIZED_PNL", startTime: String(windowStart), endTime: String(windowEnd), limit },
++      credentials
++    );
++
++    if (pnlIncome.length === 0) continue;
++
++    // 2. COMMISSION и FUNDING_FEE — на то же окно
++    const [feeIncome, fundingIncome] = await Promise.all([
++      signedGet<BinanceIncomeResponse>(
++        "/fapi/v1/income",
++        { incomeType: "COMMISSION", startTime: String(windowStart), endTime: String(windowEnd), limit },
++        credentials
++      ),
++      signedGet<BinanceIncomeResponse>(
++        "/fapi/v1/income",
++        { incomeType: "FUNDING_FEE", startTime: String(windowStart), endTime: String(windowEnd), limit },
++        credentials
++      ),
++    ]);
++
++    // Группируем комиссии и фандинг по symbol + time (с допуском ±1сек для матчинга)
++    const feeBySymbolTime = new Map<string, number>();
++    for (const f of feeIncome) {
++      const key = `${f.symbol}|${f.time}`;
++      feeBySymbolTime.set(key, (feeBySymbolTime.get(key) ?? 0) + Number(f.income));
++    }
++    const fundingBySymbol = new Map<string, number>();
++    for (const f of fundingIncome) {
++      fundingBySymbol.set(f.symbol, (fundingBySymbol.get(f.symbol) ?? 0) + Number(f.income));
++    }
++
++    // 3. userTrades — детали цены/стороны. Тянем по каждому символу из PnL.
++    const symbols = [...new Set(pnlIncome.map((p) => p.symbol))];
++    for (const symbol of symbols) {
++      let lastId: number | undefined;
++      for (let page = 0; page < 20; page++) {
++        const params: Record<string, string> = {
++          symbol,
++          startTime: String(windowStart),
++          endTime: String(windowEnd),
++          limit: "1000",
++        };
++        if (lastId) params.fromId = String(lastId + 1);
++
++        const tradeDetails = await signedGet<BinanceTradeResponse>("/fapi/v1/userTrades", params, credentials);
++        if (tradeDetails.length === 0) break;
++
++        // Группируем по orderId — один ордер = одна "позиция" в нашей модели.
++        const byOrderId = new Map<number, BinanceTradeItem[]>();
++        for (const t of tradeDetails) {
++          if (!byOrderId.has(t.orderId)) byOrderId.set(t.orderId, []);
++          byOrderId.get(t.orderId)!.push(t);
++        }
++
++        for (const [orderId, fills] of byOrderId) {
++          // Ищем PnL для этого orderId. Binance доход REALIZED_PNL привязан
++          // к tradeId, но для простоты берём суммарный PnL по symbol+time.
++          const firstFill = fills[0];
++          const lastFill = fills[fills.length - 1];
++          const symbolTime = `${symbol}|${firstFill.time}`;
++          const fee = feeBySymbolTime.get(symbolTime) ?? 0;
++          const funding = fundingBySymbol.get(symbol) ?? 0;
++
++          const realizedPnl = fills.reduce((acc, f) => acc + Number(f.realizedPnl), 0);
++          const totalQty = fills.reduce((acc, f) => acc + Number(f.qty), 0);
++
++          allTrades.push({
++            exchange: "binance" as const,
++            external_id: String(orderId),
++            symbol,
++            side: firstFill.side === "BUY" ? "long" : "short",
++            qty: totalQty,
++            entry_price: firstFill.side === "BUY" ? Number(firstFill.price) : Number(lastFill.price),
++            close_price: firstFill.side === "BUY" ? Number(lastFill.price) : Number(firstFill.price),
++            realized_pnl: realizedPnl,
++            // У Binance realizedPnl НЕ включает комиссию — она отдельной строкой.
++            fee: Math.abs(fee),
++            funding,
++            opened_at: new Date(firstFill.time).toISOString(),
++            closed_at: new Date(lastFill.time).toISOString(),
++            raw: { fills, pnlIncome: pnlIncome.filter((p) => p.symbol === symbol) },
++          });
++        }
++
++        if (tradeDetails.length < 1000) break;
++        lastId = tradeDetails[tradeDetails.length - 1].id;
++      }
++    }
++  }
++
++  return { trades: allTrades, nextCursor: null };
++}
++
++async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
++  // Простой запрос баланса — если ключ невалиден, Binance вернёт -2015.
++  await signedGet<unknown>("/fapi/v2/balance", {}, credentials);
++}
++
++export const binanceAdapter: ExchangeAdapter = {
++  id: "binance",
++  label: "Binance",
++  credentialsSchema: "key+secret",
++  fetchClosedTrades,
++  testCredentials,
++};
+diff --git a/lib/exchanges/bingx.ts b/lib/exchanges/bingx.ts
+new file mode 100644
+index 0000000..6e1619c
+--- /dev/null
++++ b/lib/exchanges/bingx.ts
+@@ -0,0 +1,135 @@
++import crypto from "crypto";
++import type { SyncedTrade } from "../types";
++import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++
++const BASE_URL = "https://open-api.bingx.com";
++
++interface BingxPositionItem {
++  positionId: string;
++  symbol: string;
++  side: "LONG" | "SHORT";
++  marginMode: "CROSS" | "ISOLATED";
++  positionType: string;
++  qty: string;
++  entryPrice: string;
++  closePrice: string;
++  realizedPNL: string;
++  fee: string;
++  fundingFee: string;
++  openTime: number; // ms epoch
++  closeTime: number; // ms epoch
++}
++
++interface BingxHistoryResponse {
++  code: number;
++  msg: string;
++  data: { positions: BingxPositionItem[]; total: number };
++}
++
++function sign(queryString: string, secret: string): string {
++  return crypto.createHmac("sha256", secret).update(queryString).digest("hex");
++}
++
++async function signedGet<T>(
++  path: string,
++  params: Record<string, string>,
++  credentials: ExchangeCredentials
++): Promise<T> {
++  const { apiKey, apiSecret } = credentials;
++  const timestamp = Date.now().toString();
++  const allParams = { ...params, timestamp, recvWindow: "5000" };
++  const queryString = new URLSearchParams(allParams).toString();
++  const signature = sign(queryString, apiSecret);
++
++  const res = await fetch(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
++    method: "GET",
++    headers: {
++      "X-BX-APIKEY": apiKey,
++      "BING-API-KEY": apiKey,
++    },
++  });
++
++  if (!res.ok) {
++    throw new Error(`BingX HTTP ${res.status}: ${await res.text()}`);
++  }
++
++  const data = (await res.json()) as T & { code: number; msg: string };
++  if (data.code !== 0) {
++    throw new Error(`BingX API error ${data.code}: ${data.msg}`);
++  }
++  return data;
++}
++
++/**
++ * BingX: /openApi/swap/v2/user/positions/history
++ *
++ * Особенности:
++ *   - Подпись: HMAC-SHA256, как у Binance
++ *   - Пагинация по pageNum/pageSize (offset-based)
++ *   - Возвращает готовые fee, fundingFee, realizedPNL — почти не требуют пересчёта
++ *   - positionType: 1=Long, 2=Short (но в v2 — side: LONG/SHORT)
++ *
++ * Регионы: лояльнее Binance, но часть ЕС под ограничениями.
++ */
++async function fetchClosedTrades(
++  credentials: ExchangeCredentials,
++  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
++): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
++  const pageSize = "100";
++  const allTrades: SyncedTrade[] = [];
++
++  let pageNum = opts?.cursor ? Number(opts.cursor) : 1;
++
++  for (let page = 0; page < 50; page++) {
++    const params: Record<string, string> = { pageSize, pageNum: String(pageNum) };
++    if (opts?.sinceMs) params.startTime = String(opts.sinceMs);
++    if (opts?.untilMs) params.endTime = String(opts.untilMs);
++
++    const data = await signedGet<BingxHistoryResponse>(
++      "/openApi/swap/v2/user/positions/history",
++      params,
++      credentials
++    );
++
++    const trades: SyncedTrade[] = data.data.positions.map((p) => ({
++      exchange: "bingx" as const,
++      external_id: p.positionId,
++      symbol: p.symbol,
++      side: p.side === "LONG" ? "long" : "short",
++      qty: Number(p.qty),
++      entry_price: Number(p.entryPrice),
++      close_price: Number(p.closePrice),
++      realized_pnl: Number(p.realizedPNL),
++      fee: Number(p.fee),
++      funding: Number(p.fundingFee),
++      opened_at: new Date(p.openTime).toISOString(),
++      closed_at: new Date(p.closeTime).toISOString(),
++      raw: p,
++    }));
++
++    allTrades.push(...trades);
++
++    if (data.data.positions.length < Number(pageSize)) break;
++    pageNum++;
++  }
++
++  // BingX не использует курсор — nextCursor всегда null.
++  return { trades: allTrades, nextCursor: null };
++}
++
++async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
++  // Простой запрос с pageSize=1.
++  await signedGet<BingxHistoryResponse>(
++    "/openApi/swap/v2/user/positions/history",
++    { pageSize: "1", pageNum: "1" },
++    credentials
++  );
++}
++
++export const bingxAdapter: ExchangeAdapter = {
++  id: "bingx",
++  label: "BingX",
++  credentialsSchema: "key+secret",
++  fetchClosedTrades,
++  testCredentials,
++};
+diff --git a/lib/exchanges/bitget.ts b/lib/exchanges/bitget.ts
+new file mode 100644
+index 0000000..7868a15
+--- /dev/null
++++ b/lib/exchanges/bitget.ts
+@@ -0,0 +1,182 @@
++import crypto from "crypto";
++import type { SyncedTrade } from "../types";
++import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++
++const BASE_URL = "https://api.bitget.com";
++
++interface BitgetPositionItem {
++  symbol: string;
++  marginCoin: string;
++  side: "openLong" | "openShort" | "closeLong" | "closeShort";
++  total: string;
++  openPriceAvg: string;
++  closePriceAvg: string;
++  pnl: string;
++  fee: string;
++  fundingRate: string;
++  cTime: number; // ms epoch
++  uTime: number; // ms epoch
++}
++
++interface BitgetClosedPositionResponse {
++  code: string;
++  msg: string;
++  data: { list: BitgetPositionItem[]; endId: string };
++}
++
++interface BitgetTokenResponse {
++  code: string;
++  msg: string;
++  data: { ts: number };
++}
++
++function sign(timestamp: string, method: string, path: string, queryString: string, body: string, secret: string): string {
++  const payload = timestamp + method.toUpperCase() + path + (queryString ? `?${queryString}` : "") + body;
++  return crypto.createHmac("sha256", secret).update(payload).digest("base64");
++}
++
++async function signedGet<T>(
++  path: string,
++  params: Record<string, string>,
++  credentials: ExchangeCredentials
++): Promise<T> {
++  const { apiKey, apiSecret, passphrase } = credentials;
++  if (!passphrase) {
++    throw new Error("Bitget требует passphrase — укажите третье поле в форме подключения");
++  }
++
++  const timestamp = (await getServerTime(credentials)).toString();
++  const queryString = new URLSearchParams(params).toString();
++  const signature = sign(timestamp, "GET", path, queryString, "", apiSecret);
++
++  const res = await fetch(`${BASE_URL}${path}?${queryString}`, {
++    method: "GET",
++    headers: {
++      "ACCESS-KEY": apiKey,
++      "ACCESS-SIGN": signature,
++      "ACCESS-TIMESTAMP": timestamp,
++      "ACCESS-PASSPHRASE": passphrase,
++      "Content-Type": "application/json",
++      "locale": "en-US",
++    },
++  });
++
++  if (!res.ok) {
++    throw new Error(`Bitget HTTP ${res.status}: ${await res.text()}`);
++  }
++
++  const data = (await res.json()) as T & { code: string; msg: string };
++  if (data.code !== "00000") {
++    throw new Error(`Bitget API error ${data.code}: ${data.msg}`);
++  }
++  return data;
++}
++
++async function getServerTime(credentials: ExchangeCredentials): Promise<number> {
++  const { apiKey, apiSecret, passphrase } = credentials;
++  if (!passphrase) {
++    throw new Error("Bitget требует passphrase");
++  }
++  const timestamp = Date.now().toString();
++  const path = "/api/v2/public/time";
++  const signature = sign(timestamp, "GET", path, "", "", apiSecret);
++
++  const res = await fetch(`${BASE_URL}${path}`, {
++    method: "GET",
++    headers: {
++      "ACCESS-KEY": apiKey,
++      "ACCESS-SIGN": signature,
++      "ACCESS-TIMESTAMP": timestamp,
++      "ACCESS-PASSPHRASE": passphrase,
++      "Content-Type": "application/json",
++    },
++  });
++
++  if (!res.ok) {
++    throw new Error(`Bitget time HTTP ${res.status}: ${await res.text()}`);
++  }
++  const data = (await res.json()) as BitgetTokenResponse;
++  return data.data.ts;
++}
++
++/**
++ * Bitget V2: /api/v2/mix/position/history-position
++ *
++ * Особенности:
++ *   - Подпись: HMAC-SHA256 с base64 (как у OKX), нужен passphrase
++ *   - timestamp берётся с сервера Bitget (чтобы избежать рассинхрона)
++ *   - Пагинация по endId — курсором, передаём в idLess для следующей страницы
++ *   - symbol обязателен для productType=USDT-FUTURES, но можно через "all" — зависит от аккаунта
++ *   - productType: USDT-FUTURES (linear), COIN-FUTURES (inverse), SUSDT-FUTURES (mock)
++ *
++ * Регионы: блокирует US, Канада, часть ЕС.
++ */
++async function fetchClosedTrades(
++  credentials: ExchangeCredentials,
++  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
++): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
++  const limit = "100";
++  const allTrades: SyncedTrade[] = [];
++
++  // Пагинация курсором (idLess).
++  let idLess: string | undefined = opts?.cursor;
++
++  for (let page = 0; page < 50; page++) {
++    const params: Record<string, string> = {
++      productType: "USDT-FUTURES",
++      limit,
++      ...(idLess ? { idLess } : {}),
++    };
++    // Опционально фильтруем по времени, если задано
++    if (opts?.sinceMs) params.startTime = String(opts.sinceMs);
++    if (opts?.untilMs) params.endTime = String(opts.untilMs);
++
++    const data = await signedGet<BitgetClosedPositionResponse>(
++      "/api/v2/mix/position/history-position",
++      params,
++      credentials
++    );
++
++    const trades: SyncedTrade[] = data.data.list.map((p) => ({
++      exchange: "bitget" as const,
++      external_id: `${p.symbol}_${p.cTime}`,
++      symbol: p.symbol,
++      side: p.side === "openLong" || p.side === "closeLong" ? "long" : "short",
++      qty: Number(p.total),
++      entry_price: Number(p.openPriceAvg),
++      close_price: Number(p.closePriceAvg),
++      realized_pnl: Number(p.pnl),
++      fee: Number(p.fee),
++      funding: Number(p.fundingRate),
++      opened_at: new Date(p.cTime).toISOString(),
++      closed_at: new Date(p.uTime).toISOString(),
++      raw: p,
++    }));
++
++    allTrades.push(...trades);
++
++    // Если вернулось меньше limit — достигли конца.
++    if (data.data.list.length < Number(limit)) break;
++    idLess = data.data.endId;
++    if (!idLess) break;
++  }
++
++  return { trades: allTrades, nextCursor: null };
++}
++
++async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
++  // Простой запрос с limit=1.
++  await signedGet<BitgetClosedPositionResponse>(
++    "/api/v2/mix/position/history-position",
++    { productType: "USDT-FUTURES", limit: "1" },
++    credentials
++  );
++}
++
++export const bitgetAdapter: ExchangeAdapter = {
++  id: "bitget",
++  label: "Bitget",
++  credentialsSchema: "key+secret+passphrase",
++  fetchClosedTrades,
++  testCredentials,
++};
+diff --git a/lib/exchanges/bitunix.ts b/lib/exchanges/bitunix.ts
+index 946c207..29f75b3 100644
+--- a/lib/exchanges/bitunix.ts
++++ b/lib/exchanges/bitunix.ts
+@@ -1,6 +1,6 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+-import type { ExchangeCredentials } from "./bybit";
++import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+ 
+ const BASE_URL = "https://fapi.bitunix.com";
+ 
+@@ -61,7 +61,7 @@ function buildSignedHeaders(
+     sign,
+     nonce,
+     timestamp,
+-    language: "en-US",
++    "language": "en-US",
+     "Content-Type": "application/json",
+   };
+ }
+@@ -75,25 +75,83 @@ function toIso(value: unknown): string {
+ }
+ 
+ /**
+- * Забирает закрытые позиции по фьючерсам. Bitunix отдаёт realizedPNL, fee и
+- * funding уже готовыми полями — почти не требует пересчёта.
+- * symbol опционален в их API, но по факту многие аккаунты требуют его
+- * передавать по одному тикеру за раз — если так, дергать эту функцию в
+- * цикле по списку торгуемых символов.
++ * Bitunix: /api/v1/futures/position/get_history_positions
++ *
++ * Особенности:
++ *   - symbol опционален в их API, но по факту многие аккаунты требуют его
++ *     передавать по одному тикеру за раз. Список тикеров берётся из env
++ *     BITUNIX_SYMBOLS (через запятую). Если env пустой — запрос без symbol.
++ *   - Пагинация через skip/limit (offset-based), не курсором.
++ *   - fee и funding приходят готовыми полями — почти не требуют пересчёта.
++ *
++ * Специфика цикла по символам живёт ЗДЕСЬ, а не в route handler.
+  */
+-export async function fetchBitunixHistoryPositions(
++async function fetchClosedTrades(
+   credentials: ExchangeCredentials,
+-  opts?: {
+-    symbol?: string;
+-    skip?: number;
+-    limit?: number;
++  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
++): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
++  // Список торгуемых символов из env. Если пусто — тянем все разом.
++  const symbolsEnv = process.env.BITUNIX_SYMBOLS?.trim();
++  const symbols = symbolsEnv ? symbolsEnv.split(",").map((s) => s.trim()) : [undefined];
++
++  const allTrades: SyncedTrade[] = [];
++
++  for (const symbol of symbols) {
++    let skip = 0;
++    const limit = 100;
++
++    // 20 страниц максимум на символ — защиты от бесконечного цикла.
++    for (let page = 0; page < 20; page++) {
++      const params: Record<string, string> = { limit: String(limit) };
++      if (symbol) params.symbol = symbol;
++      if (skip > 0) params.skip = String(skip);
++
++      const headers = buildSignedHeaders(params, "", credentials);
++      const qs = new URLSearchParams(params).toString();
++
++      const res = await fetch(
++        `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
++        { method: "GET", headers }
++      );
++
++      if (!res.ok) {
++        throw new Error(`Bitunix HTTP ${res.status}: ${await res.text()}`);
++      }
++
++      const data = (await res.json()) as BitunixHistoryPositionsResponse;
++      if (data.code !== 0) {
++        throw new Error(`Bitunix API error ${data.code}: ${data.msg}`);
++      }
++
++      const trades: SyncedTrade[] = data.data.positionList.map((p) => ({
++        exchange: "bitunix" as const,
++        external_id: p.positionId,
++        symbol: p.symbol,
++        side: p.side === "LONG" ? "long" : "short",
++        qty: Number(p.maxQty),
++        entry_price: Number(p.entryPrice),
++        close_price: Number(p.closePrice),
++        realized_pnl: Number(p.realizedPNL),
++        fee: Number(p.fee),
++        funding: Number(p.funding),
++        opened_at: toIso(p.ctime),
++        closed_at: toIso(p.mtime),
++        raw: p,
++      }));
++
++      allTrades.push(...trades);
++      if (trades.length < limit) break;
++      skip += limit;
++    }
+   }
+-): Promise<SyncedTrade[]> {
+-  const params: Record<string, string> = {};
+-  if (opts?.symbol) params.symbol = opts.symbol;
+-  if (opts?.skip) params.skip = String(opts.skip);
+-  params.limit = String(opts?.limit ?? 100);
+ 
++  // Bitunix не использует курсор — nextCursor всегда null.
++  return { trades: allTrades, nextCursor: null };
++}
++
++async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
++  // Простой запрос с limit=1 — если ключ невалиден, Bitunix вернёт ошибку.
++  const params: Record<string, string> = { limit: "1" };
+   const headers = buildSignedHeaders(params, "", credentials);
+   const qs = new URLSearchParams(params).toString();
+ 
+@@ -101,34 +159,22 @@ export async function fetchBitunixHistoryPositions(
+     `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
+     { method: "GET", headers }
+   );
+-
+   if (!res.ok) {
+     throw new Error(`Bitunix HTTP ${res.status}: ${await res.text()}`);
+   }
+-
+   const data = (await res.json()) as BitunixHistoryPositionsResponse;
+   if (data.code !== 0) {
+     throw new Error(`Bitunix API error ${data.code}: ${data.msg}`);
+   }
+-
+-  return data.data.positionList.map((p) => ({
+-    exchange: "bitunix" as const,
+-    external_id: p.positionId,
+-    symbol: p.symbol,
+-    side: p.side === "LONG" ? "long" : "short",
+-    qty: Number(p.maxQty),
+-    entry_price: Number(p.entryPrice),
+-    close_price: Number(p.closePrice),
+-    realized_pnl: Number(p.realizedPNL),
+-    fee: Number(p.fee),
+-    funding: Number(p.funding),
+-    opened_at: toIso(p.ctime),
+-    closed_at: toIso(p.mtime),
+-    raw: p,
+-  }));
+ }
+ 
+-/** Лёгкая проверка валидности ключа */
+-export async function testBitunixCredentials(credentials: ExchangeCredentials): Promise<void> {
+-  await fetchBitunixHistoryPositions(credentials, { limit: 1 });
+-}
++export const bitunixAdapter: ExchangeAdapter = {
++  id: "bitunix",
++  label: "Bitunix",
++  credentialsSchema: "key+secret",
++  fetchClosedTrades,
++  testCredentials,
++};
++
++// Обратная совместимость
++export { fetchClosedTrades as fetchBitunixHistoryPositions, testCredentials as testBitunixCredentials };
+diff --git a/lib/exchanges/bybit.ts b/lib/exchanges/bybit.ts
+index 89a2cba..493e2be 100644
+--- a/lib/exchanges/bybit.ts
++++ b/lib/exchanges/bybit.ts
+@@ -1,14 +1,10 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
++import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+ 
+ const BASE_URL = "https://api.bybit.com";
+ const RECV_WINDOW = "5000";
+ 
+-export interface ExchangeCredentials {
+-  apiKey: string;
+-  apiSecret: string;
+-}
+-
+ interface BybitClosedPnlItem {
+   orderId: string;
+   symbol: string;
+@@ -20,6 +16,10 @@ interface BybitClosedPnlItem {
+   cumEntryValue: string;
+   createdTime: string; // ms epoch, открытие
+   updatedTime: string; // ms epoch, закрытие
++  // Bybit V5 /v5/position/closed-pnl документированно НЕ возвращает fee.
++  // Но иногда биржа отдаёт undocumented поля — пробуем их читать, если есть.
++  execFee?: string;
++  feeRate?: string;
+ }
+ 
+ interface BybitClosedPnlResponse {
+@@ -74,61 +74,106 @@ async function signedGet<T>(
+ }
+ 
+ /**
+- * Забирает закрытые позиции по USDT-перпетуалам (category=linear) начиная
+- * с курсора. Bybit хранит closed-pnl историю максимум за 2 года и отдаёт
+- * постранично через cursor. Ключи передаются параметром — берутся либо из
+- * exchange_connections (расшифрованные), либо (для обратной совместимости)
+- * из env при локальном запуске без БД-подключений.
++ * Bybit V5: /v5/position/closed-pnl
++ *
++ * Ограничения биржи:
++ *   - История хранится ~2 года
++ *   - Диапазон endTime - startTime <= 7 дней (или последние 24ч без явных дат)
++ *   - Постраничная пагинация через cursor
++ *
++ * Поэтому fetchClosedTrades САМ нарезает запрошенный период на 7-дневные окна
++ * и проходит их все с пагинацией. Это специфика Bybit — раньше логика жила
++ * в route handler, теперь здесь, где ей и место.
++ *
++ * fee: Bybit closedPnl УЖЕ включает вычет комиссии, поэтому fee=0 чтобы не
++ * задваивать. Это корректно для PnL-сводки, но не для расчёта баланса
++ * (см. TODO в README — нужен отдельный эндпоинт /v5/account/transaction-log).
++ * Пробуем читать undocumented поле execFee, если биржа его отдаёт.
+  */
+-export async function fetchBybitClosedPnl(
++async function fetchClosedTrades(
+   credentials: ExchangeCredentials,
+-  opts?: {
+-    cursor?: string;
+-    startTimeMs?: number;
+-    endTimeMs?: number;
+-  }
++  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
+ ): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
+-  const params: Record<string, string> = {
+-    category: "linear",
+-    limit: "100",
+-  };
+-  if (opts?.cursor) params.cursor = opts.cursor;
+-  if (opts?.startTimeMs) params.startTime = String(opts.startTimeMs);
+-  if (opts?.endTimeMs) params.endTime = String(opts.endTimeMs);
++  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
++  const now = Date.now();
++  const until = opts?.untilMs ?? now;
++  // По умолчанию тянем год назад — как в старом route handler.
++  const since = opts?.sinceMs ?? now - 365 * 24 * 60 * 60 * 1000;
+ 
+-  const data = await signedGet<BybitClosedPnlResponse>(
+-    "/v5/position/closed-pnl",
+-    params,
+-    credentials
+-  );
++  const allTrades: SyncedTrade[] = [];
++  let finalCursor: string | null = null;
+ 
+-  const trades: SyncedTrade[] = data.result.list.map((item) => ({
+-    exchange: "bybit" as const,
+-    external_id: item.orderId,
+-    symbol: item.symbol,
+-    side: item.side === "Buy" ? "long" : "short",
+-    qty: Number(item.qty),
+-    entry_price: Number(item.avgEntryPrice),
+-    close_price: Number(item.avgExitPrice),
+-    realized_pnl: Number(item.closedPnl),
+-    fee: 0, // fee уже вычтена из closedPnl биржей, храним 0 чтобы не задваивать
+-    funding: 0,
+-    opened_at: new Date(Number(item.createdTime)).toISOString(),
+-    closed_at: new Date(Number(item.updatedTime)).toISOString(),
+-    raw: item,
+-  }));
+-
+-  return {
+-    trades,
+-    nextCursor: data.result.nextPageCursor || null,
+-  };
++  // Нарезаем на 7-дневные окна — Bybit не отдаёт больше за один запрос.
++  for (let windowEnd = until; windowEnd > since; windowEnd -= SEVEN_DAYS_MS) {
++    const windowStart = Math.max(windowEnd - SEVEN_DAYS_MS, since);
++    let cursor: string | undefined = opts?.cursor;
++
++    // Пагинация курсором внутри одного окна (на случай, если сделок > 100).
++    for (let page = 0; page < 10; page++) {
++      const params: Record<string, string> = {
++        category: "linear",
++        limit: "100",
++        startTime: String(windowStart),
++        endTime: String(windowEnd),
++      };
++      if (cursor) params.cursor = cursor;
++
++      const data = await signedGet<BybitClosedPnlResponse>(
++        "/v5/position/closed-pnl",
++        params,
++        credentials
++      );
++
++      const trades: SyncedTrade[] = data.result.list.map((item) => {
++        // Пробуем взять fee из undocumented полей, если Bybit их отдаёт.
++        // Если нет — 0 (closedPnl уже включает вычет комиссии).
++        const fee = item.execFee ? Number(item.execFee) : 0;
++        return {
++          exchange: "bybit" as const,
++          external_id: item.orderId,
++          symbol: item.symbol,
++          side: item.side === "Buy" ? "long" : "short",
++          qty: Number(item.qty),
++          entry_price: Number(item.avgEntryPrice),
++          close_price: Number(item.avgExitPrice),
++          realized_pnl: Number(item.closedPnl),
++          fee,
++          funding: 0,
++          opened_at: new Date(Number(item.createdTime)).toISOString(),
++          closed_at: new Date(Number(item.updatedTime)).toISOString(),
++          raw: item,
++        };
++      });
++
++      allTrades.push(...trades);
++
++      if (!data.result.nextPageCursor) break;
++      cursor = data.result.nextPageCursor;
++    }
++  }
++
++  // Возвращаем null как nextCursor — все 7-дневные окна уже прошли.
++  // cursor от opts используется только для первой итерации первого окна,
++  // что достаточно для наших сценариев синка.
++  return { trades: allTrades, nextCursor: finalCursor };
+ }
+ 
+-/** Лёгкая проверка валидности ключа — дергает эндпоинт с limit=1 */
+-export async function testBybitCredentials(credentials: ExchangeCredentials): Promise<void> {
++async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
+   await signedGet<BybitClosedPnlResponse>(
+     "/v5/position/closed-pnl",
+     { category: "linear", limit: "1" },
+     credentials
+   );
+ }
++
++export const bybitAdapter: ExchangeAdapter = {
++  id: "bybit",
++  label: "Bybit",
++  credentialsSchema: "key+secret",
++  fetchClosedTrades,
++  testCredentials,
++};
++
++// Обратная совместимость — старые импорты fetchBybitClosedPnl / testBybitCredentials.
++// deprecated, используйте bybitAdapter.fetchClosedTrades / bybitAdapter.testCredentials.
++export { fetchClosedTrades as fetchBybitClosedPnl, testCredentials as testBybitCredentials };
+diff --git a/lib/exchanges/index.ts b/lib/exchanges/index.ts
+new file mode 100644
+index 0000000..ffdf354
+--- /dev/null
++++ b/lib/exchanges/index.ts
+@@ -0,0 +1,69 @@
++import type { ExchangeAdapter, Exchange } from "./types";
++import { bybitAdapter } from "./bybit";
++import { bitunixAdapter } from "./bitunix";
++import { binanceAdapter } from "./binance";
++import { bitgetAdapter } from "./bitget";
++import { bingxAdapter } from "./bingx";
++import { mexcAdapter } from "./mexc";
++
++/**
++ * Список поддерживаемых бирж.
++ *
++ * ВАЖНО: при добавлении биржи нужно:
++ *   1. Добавить её в этот массив
++ *   2. Реализовать адаптер в lib/exchanges/<name>.ts
++ *   3. Добавить в REGISTRY ниже
++ *   4. Добавить в Exchange union в lib/exchanges/types.ts
++ *   5. Обновить CHECK constraint в БД (миграция)
++ *
++ * "manual" сюда НЕ входит — это не настоящая биржа, а ручные сделки.
++ */
++export const EXCHANGES: Exchange[] = [
++  "bybit",
++  "bitunix",
++  "binance",
++  "bitget",
++  "bingx",
++  "mexc",
++];
++
++/**
++ * Реестр адаптеров. Один источник правды — route handler /api/sync/[exchange]
++ * просто делает REGISTRY[params.exchange] и работает с адаптером.
++ */
++export const REGISTRY: Record<Exchange, ExchangeAdapter> = {
++  bybit: bybitAdapter,
++  bitunix: bitunixAdapter,
++  binance: binanceAdapter,
++  bitget: bitgetAdapter,
++  bingx: bingxAdapter,
++  mexc: mexcAdapter,
++  // manual не имеет адаптера — это не настоящая биржа.
++  // Но Record<Exchange, ...> требует ключ для manual — ставим заглушку,
++  // которая бросает ошибку, если кто-то попытается её использовать.
++  manual: {
++    id: "manual",
++    label: "Manual",
++    credentialsSchema: "key+secret",
++    fetchClosedTrades: async () => {
++      throw new Error("manual — не настоящая биржа, синк не поддерживается");
++    },
++    testCredentials: async () => {
++      throw new Error("manual — не настоящая биржа");
++    },
++  },
++};
++
++/**
++ * Список реальных бирж (без manual) для UI — форма подключения, фильтры.
++ */
++export function getExchangeList(): { id: Exchange; label: string }[] {
++  return EXCHANGES.map((id) => ({ id, label: REGISTRY[id].label }));
++}
++
++/**
++ * Проверка, что строка — валидный идентификатор биржи (без manual).
++ */
++export function isValidExchange(value: string): value is Exchange {
++  return (EXCHANGES as string[]).includes(value);
++}
+diff --git a/lib/exchanges/mexc.ts b/lib/exchanges/mexc.ts
+new file mode 100644
+index 0000000..f652d2e
+--- /dev/null
++++ b/lib/exchanges/mexc.ts
+@@ -0,0 +1,131 @@
++import crypto from "crypto";
++import type { SyncedTrade } from "../types";
++import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++
++const BASE_URL = "https://contract.mexc.com";
++
++interface MexcPositionItem {
++  positionId: number;
++  symbol: string;
++  positionType: 1 | 2; // 1=Long, 2=Short
++  holdVol: string;
++  openAvgPrice: string;
++  closeAvgPrice: string;
++  realizedAmount: string;
++  fee: string;
++  fundingAmount: string;
++  openTime: number; // ms epoch
++  closeTime: number; // ms epoch
++}
++
++interface MexcHistoryResponse {
++  success: boolean;
++  code: number;
++  data: { resultList: MexcPositionItem[]; page: { total: number; pageSize: number; pageNum: number } };
++}
++
++function sign(queryString: string, secret: string): string {
++  return crypto.createHmac("sha256", secret).update(queryString).digest("hex");
++}
++
++async function signedGet<T>(
++  path: string,
++  params: Record<string, string>,
++  credentials: ExchangeCredentials
++): Promise<T> {
++  const { apiKey, apiSecret } = credentials;
++  const timestamp = Date.now().toString();
++  const allParams = { ...params, timestamp, recvWindow: "5000" };
++  const queryString = new URLSearchParams(allParams).toString();
++  const signature = sign(queryString, apiSecret);
++
++  const res = await fetch(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
++    method: "GET",
++    headers: {
++      "ApiKey": apiKey,
++      "Request-Time": timestamp,
++    },
++  });
++
++  if (!res.ok) {
++    throw new Error(`MEXC HTTP ${res.status}: ${await res.text()}`);
++  }
++
++  const data = (await res.json()) as T & { success: boolean; code: number };
++  if (!data.success || data.code !== 0) {
++    throw new Error(`MEXC API error ${data.code}`);
++  }
++  return data;
++}
++
++/**
++ * MEXC: /api/v1/private/position/list/history-position
++ *
++ * Особенности:
++ *   - Подпись: HMAC-SHA256 (как Binance)
++ *   - Пагинация по pageNum/pageSize
++ *   - Возвращает готовые fee, fundingAmount, realizedAmount
++ *   - positionType: 1=Long, 2=Short
++ *
++ * Регионы: блокирует US, Канада. Жёстче rate-limit, чем у Binance.
++ */
++async function fetchClosedTrades(
++  credentials: ExchangeCredentials,
++  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
++): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
++  const pageSize = "100";
++  const allTrades: SyncedTrade[] = [];
++
++  let pageNum = opts?.cursor ? Number(opts.cursor) : 1;
++
++  for (let page = 0; page < 50; page++) {
++    const params: Record<string, string> = { pageSize, pageNum: String(pageNum) };
++    if (opts?.sinceMs) params.startTime = String(opts.sinceMs);
++    if (opts?.untilMs) params.endTime = String(opts.untilMs);
++
++    const data = await signedGet<MexcHistoryResponse>(
++      "/api/v1/private/position/list/history-position",
++      params,
++      credentials
++    );
++
++    const trades: SyncedTrade[] = data.data.resultList.map((p) => ({
++      exchange: "mexc" as const,
++      external_id: String(p.positionId),
++      symbol: p.symbol,
++      side: p.positionType === 1 ? "long" : "short",
++      qty: Number(p.holdVol),
++      entry_price: Number(p.openAvgPrice),
++      close_price: Number(p.closeAvgPrice),
++      realized_pnl: Number(p.realizedAmount),
++      fee: Number(p.fee),
++      funding: Number(p.fundingAmount),
++      opened_at: new Date(p.openTime).toISOString(),
++      closed_at: new Date(p.closeTime).toISOString(),
++      raw: p,
++    }));
++
++    allTrades.push(...trades);
++
++    if (data.data.resultList.length < Number(pageSize)) break;
++    pageNum++;
++  }
++
++  return { trades: allTrades, nextCursor: null };
++}
++
++async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
++  await signedGet<MexcHistoryResponse>(
++    "/api/v1/private/position/list/history-position",
++    { pageSize: "1", pageNum: "1" },
++    credentials
++  );
++}
++
++export const mexcAdapter: ExchangeAdapter = {
++  id: "mexc",
++  label: "MEXC",
++  credentialsSchema: "key+secret",
++  fetchClosedTrades,
++  testCredentials,
++};
+diff --git a/lib/exchanges/types.ts b/lib/exchanges/types.ts
+new file mode 100644
+index 0000000..ed53b77
+--- /dev/null
++++ b/lib/exchanges/types.ts
+@@ -0,0 +1,97 @@
++import type { SyncedTrade } from "@/lib/types";
++
++/**
++ * Схема учётных данных биржи.
++ *   - "key+secret"            — Bybit, Binance, MEXC, BingX
++ *   - "key+secret+passphrase" — Bitget, OKX, KuCoin (пока не используем, задел на будущее)
++ *   - "key+privatekey"        — Coinbase Advanced Trade (JWT ES256, не HMAC)
++ */
++export type CredentialsSchema = "key+secret" | "key+secret+passphrase" | "key+privatekey";
++
++/**
++ * Унифицированные учётные данные. passphrase/privateKey опциональны —
++ * нужны только для бирж с соответствующей схемой.
++ */
++export interface ExchangeCredentials {
++  apiKey: string;
++  apiSecret: string;
++  passphrase?: string;
++  privateKey?: string;
++}
++
++/**
++ * Общий интерфейс адаптера биржи.
++ *
++ * Каждый адаптер отвечает за:
++ *   - подпись запросов к бирже (HMAC-SHA256/SHA512, JWT и т.д.)
++ *   - маппинг ответа в унифицированный SyncedTrade
++ *   - нарезку окон/пагинацию (специфика биржи живёт ЗДЕСЬ, а не в route handler)
++ *   - валидацию ключа перед сохранением (testCredentials)
++ *
++ * Адаптер НЕ отвечает за:
++ *   - чтение из БД / расшифровку ключей (это lib/sync.ts)
++ *   - запись в trades (это route handler)
++ *   - изоляцию ошибок между пользователями (это lib/sync.ts)
++ */
++export interface ExchangeAdapter {
++  /** Идентификатор биржи — должен совпадать со значением в Exchange union и БД. */
++  id: Exchange;
++
++  /** Человекочитаемое название для UI. */
++  label: string;
++
++  /** Схема учётных данных — определяет, какие поля рендерить в форме подключения. */
++  credentialsSchema: CredentialsSchema;
++
++  /**
++   * Тянуть закрытые сделки начиная с курсора/временного окна.
++   *
++   * Адаптер сам отвечает за нарезку окон (если биржа требует, как Bybit с 7-дневным
++   * лимитом) и пагинацию внутри окон. route handler просто вызывает fetchClosedTrades
++   * в цикле, пока nextCursor !== null.
++   *
++   * Параметры:
++   *   - sinceMs: тянуть сделки после этого момента (для delta-синка)
++   *   - untilMs: тянуть сделки до этого момента (обычно now)
++   *   - cursor: курсор пагинации от предыдущего вызова
++   *
++   * Возвращает:
++   *   - trades: массив унифицированных сделок (БЕЗ user_id — его добавит route handler)
++   *   - nextCursor: null если достигли конца, иначе курсор для следующей страницы
++   *
++   * Опциональные параметры-фильтры (например, symbols для Bitunix) читаются из env.
++   */
++  fetchClosedTrades(
++    credentials: ExchangeCredentials,
++    opts?: {
++      sinceMs?: number;
++      untilMs?: number;
++      cursor?: string;
++    }
++  ): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }>;
++
++  /**
++   * Лёгкая проверка валидности ключа — дёргает эндпоинт с limit=1.
++   * Бросает Error, если ключ невалиден.
++   */
++  testCredentials(credentials: ExchangeCredentials): Promise<void>;
++}
++
++/**
++ * Тип Exchange объявлен ЗДЕСЬ (а не в index.ts), чтобы избежать циклического
++ * импорта (types.ts ← index.ts ← types.ts). Массив EXCHANGES в index.ts должен
++ * быть синхронизирован с этим union — иначе тайпчек падает.
++ *
++ * "manual" добавлен отдельно — это не настоящая биржа, а ручные сделки юзера.
++ *
++ * При добавлении биржи: добавьте её И в массив EXCHANGES (index.ts), И в union
++ * ниже. На практике они синхронизированы, потому что адаптеры ссылаются на тип.
++ */
++export type Exchange =
++  | "bybit"
++  | "bitunix"
++  | "binance"
++  | "bitget"
++  | "bingx"
++  | "mexc"
++  | "manual";
+diff --git a/lib/sync.ts b/lib/sync.ts
+index 7c14567..87f0982 100644
+--- a/lib/sync.ts
++++ b/lib/sync.ts
+@@ -1,7 +1,8 @@
+ import { getSupabaseServerClient } from "@/lib/supabase";
+ import { decrypt } from "@/lib/crypto";
+-import type { ExchangeCredentials } from "@/lib/exchanges/bybit";
++import type { ExchangeCredentials } from "@/lib/exchanges/types";
+ import type { SyncAuth } from "@/lib/auth";
++import { EXCHANGES, isValidExchange } from "@/lib/exchanges";
+ 
+ export interface SyncTarget {
+   userId: string;
+@@ -23,15 +24,17 @@ export interface SyncUserResult {
+  * Ключи расшифровываются здесь же — наружу отдаются готовые credentials.
+  */
+ export async function getSyncTargets(
+-  exchange: "bybit" | "bitunix",
++  exchange: (typeof EXCHANGES)[number],
+   auth: SyncAuth
+ ): Promise<SyncTarget[]> {
+   if ("error" in auth) return [];
+ 
+   const supabase = getSupabaseServerClient();
++  // Читаем в т.ч. passphrase_encrypted — для бирж, которые его требуют (Bitget, OKX, KuCoin).
++  // Для бирж без passphrase колонка будет null — просто не передаём поле.
+   let query = supabase
+     .from("exchange_connections")
+-    .select("user_id, api_key_encrypted, api_secret_encrypted")
++    .select("user_id, api_key_encrypted, api_secret_encrypted, passphrase_encrypted")
+     .eq("exchange", exchange);
+ 
+   if (auth.mode === "user") {
+@@ -42,13 +45,17 @@ export async function getSyncTargets(
+   if (error) throw error;
+   if (!data || data.length === 0) return [];
+ 
+-  return data.map((row) => ({
+-    userId: row.user_id,
+-    credentials: {
++  return data.map((row) => {
++    const creds: ExchangeCredentials = {
+       apiKey: decrypt(row.api_key_encrypted),
+       apiSecret: decrypt(row.api_secret_encrypted),
+-    },
+-  }));
++    };
++    // passphrase может быть null для бирж без него (Bybit, Binance, MEXC, BingX).
++    if (row.passphrase_encrypted) {
++      creds.passphrase = decrypt(row.passphrase_encrypted);
++    }
++    return { userId: row.user_id, credentials: creds };
++  });
+ }
+ 
+ /**
+diff --git a/lib/types.ts b/lib/types.ts
+index 17f12a0..92d569a 100644
+--- a/lib/types.ts
++++ b/lib/types.ts
+@@ -1,4 +1,10 @@
+-export type Exchange = "bybit" | "bitunix" | "manual";
++// Exchange берётся из lib/exchanges/types.ts, чтобы при добавлении новой
++// биржи не надо было править этот тип — он автоматически расширится через
++// union в lib/exchanges/types.ts. "manual" — это не настоящая биржа, а ручные
++// сделки пользователя.
++import type { Exchange } from "@/lib/exchanges/types";
++
++export type { Exchange };
+ 
+ export interface Trade {
+   id: string;
+diff --git a/supabase/migration_04_new_exchanges.sql b/supabase/migration_04_new_exchanges.sql
+new file mode 100644
+index 0000000..baf654c
+--- /dev/null
++++ b/supabase/migration_04_new_exchanges.sql
+@@ -0,0 +1,34 @@
++-- ============================================================
++-- Миграция 4: добавление новых бирж (Binance, Bitget, BingX, MEXC)
++-- + колонка passphrase_encrypted для бирж с ключ+secret+passphrase
++-- ============================================================
++
++-- 1. Расширяем CHECK constraint на trades: добавляем новые биржи.
++--    'manual' остаётся — это ручные сделки, не настоящая биржа.
++alter table trades drop constraint if exists trades_exchange_check;
++alter table trades add constraint trades_exchange_check
++  check (exchange in ('bybit', 'bitunix', 'binance', 'bitget', 'bingx', 'mexc', 'manual'));
++
++-- 2. То же самое на exchange_connections — туда 'manual' не входит,
++--    ручные сделки не имеют API-ключей.
++alter table exchange_connections drop constraint if exists exchange_connections_exchange_check;
++alter table exchange_connections add constraint exchange_connections_exchange_check
++  check (exchange in ('bybit', 'bitunix', 'binance', 'bitget', 'bingx', 'mexc'));
++
++-- 3. Колонка passphrase_encrypted — для Bitget, OKX, KuCoin и других бирж,
++--    которые требуют третье поле при создании API-ключа. Для бирж без
++--    passphrase (Bybit, Binance, MEXC, BingX) колонка остаётся NULL.
++alter table exchange_connections
++  add column if not exists passphrase_encrypted text;
++
++-- Комментарий в БД, чтобы будущие разработчики понимали назначение колонки.
++comment on column exchange_connections.passphrase_encrypted is
++  'Зашифрованная passphrase биржи (Bitget, OKX, KuCoin). NULL для бирж без passphrase.';
++
++-- 4. Проверка (необязательно — для self-audit после миграции):
++--    должно показать список всех бирж, разрешённых в CHECK.
++-- select con.conname, pg_get_constraintdef(con.oid)
++-- from pg_constraint con
++-- join pg_class rel on rel.oid = con.conrelid
++-- where rel.relname in ('trades', 'exchange_connections')
++--   and con.contype = 'c';
+diff --git a/vercel.json b/vercel.json
+index 6e90893..1ca5539 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -2,6 +2,10 @@
+   "regions": ["fra1"],
+   "crons": [
+     { "path": "/api/sync/bybit", "schedule": "0 0 * * *" },
+-    { "path": "/api/sync/bitunix", "schedule": "0 0 * * *" }
++    { "path": "/api/sync/bitunix", "schedule": "0 0 * * *" },
++    { "path": "/api/sync/binance", "schedule": "0 0 * * *" },
++    { "path": "/api/sync/bitget", "schedule": "0 0 * * *" },
++    { "path": "/api/sync/bingx", "schedule": "0 0 * * *" },
++    { "path": "/api/sync/mexc", "schedule": "0 0 * * *" }
+   ]
+ }
+-- 
+2.47.3
+
