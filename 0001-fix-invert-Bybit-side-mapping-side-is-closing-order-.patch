@@ -1,0 +1,64 @@
+From e7bbdffc703efc119fb6c25d762db5a75f71db2b Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Mon, 13 Jul 2026 22:44:36 +0000
+Subject: [PATCH] =?UTF-8?q?fix:=20invert=20Bybit=20side=20mapping=20?=
+ =?UTF-8?q?=E2=80=94=20side=20is=20closing=20order,=20not=20position?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+По документации Bybit V5 /v5/position/closed-pnl: side = side ЗАКРЫВАЮЩЕГО
+ордера (Side of the order that closed the position):
+  - Buy  = закрыли SHORT позицию → side должно быть 'short'
+  - Sell = закрыли LONG позицию  → side должно быть 'long'
+
+Старый код делал наоборот: Buy → long, Sell → short. Это инверсия.
+
+Подтверждение данными пользователя (1849 bybit-сделок):
+  long (Buy), 771 сделок: только 45% выросли (close > entry).
+  short (Sell), 1078 сделок: 61% упали (close < entry).
+  Суммарно правильно: ~54%.
+
+После инверсии ожидаемо:
+  long (Sell), 1078 сделок: должны расти
+  short (Buy), 771 сделок: должны падать
+
+ВАЖНО: для обновления СУЩЕСТВУЮЩИХ сделок в БД нужно выполнить SQL:
+  update trades set side = case
+    when raw->>'side' in ('Buy', 'BUY', 'buy') then 'short'
+    when raw->>'side' in ('Sell', 'SELL', 'sell') then 'long'
+    else side
+  end where exchange = 'bybit';
+
+Этот патч чинит только НОВЫЕ синки. Старые сделки надо обновить SQL выше,
+иначе при следующем синке upsert обновит side на новый (правильный),
+но это займёт время — SQL быстрее.
+---
+ lib/exchanges/bybit.ts | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/lib/exchanges/bybit.ts b/lib/exchanges/bybit.ts
+index 493e2be..e7e60ca 100644
+--- a/lib/exchanges/bybit.ts
++++ b/lib/exchanges/bybit.ts
+@@ -128,11 +128,16 @@ async function fetchClosedTrades(
+         // Пробуем взять fee из undocumented полей, если Bybit их отдаёт.
+         // Если нет — 0 (closedPnl уже включает вычет комиссии).
+         const fee = item.execFee ? Number(item.execFee) : 0;
++        // Bybit V5 /v5/position/closed-pnl: side = side ЗАКРЫВАЮЩЕГО ордера.
++        //   Buy  = закрыли SHORT позицию → side должно быть "short"
++        //   Sell = закрыли LONG позицию  → side должно быть "long"
++        // Поэтому маппинг ИНВЕРТИРОВАН относительно обычной конвенции.
++        const side: "long" | "short" = item.side === "Buy" ? "short" : "long";
+         return {
+           exchange: "bybit" as const,
+           external_id: item.orderId,
+           symbol: item.symbol,
+-          side: item.side === "Buy" ? "long" : "short",
++          side,
+           qty: Number(item.qty),
+           entry_price: Number(item.avgEntryPrice),
+           close_price: Number(item.avgExitPrice),
+-- 
+2.47.3
+
