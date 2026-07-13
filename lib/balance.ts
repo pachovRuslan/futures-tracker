@@ -98,6 +98,12 @@ export async function getBalanceChartForUser(
   let tradeIdx = 0;
   const typedTrades: Trade[] = (trades ?? []) as unknown as Trade[];
 
+  // Forward-fill для spot: если ввели $1000 14 июля, то 15-16-17 июля
+  // спот остаётся $1000 (пока не введёте новое значение). Без этого линия
+  // spot рисуется только в точках ввода (нужно 2+ точки), а spread
+  // считается только там, где spot не null — получается одна точка.
+  let lastSpot: { value: number; date: string } | null = null;
+
   for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + stepDays)) {
     const dateStr = d.toISOString().slice(0, 10);
 
@@ -111,9 +117,19 @@ export async function getBalanceChartForUser(
       tradeIdx++;
     }
 
-    // SPOT — только если есть ручной снапшот на эту дату
+    // SPOT — forward-fill: берём последний снапшот на или до этой даты.
+    // Если есть новый снапшот на эту дату — обновляем lastSpot.
+    // Если снапшотов ещё не было вообще — spot = null (не рисуем до первой точки).
     const spotSnap = spotSnapshots.find((s) => s.snapshot_date === dateStr);
-    const spot = spotSnap ? Number(spotSnap.value_usd) : null;
+    if (spotSnap) {
+      lastSpot = { value: Number(spotSnap.value_usd), date: dateStr };
+    } else if (lastSpot && lastSpot.date > dateStr) {
+      // Защита: если мы каким-то образом оказались раньше первой точки — сбрасываем
+      lastSpot = null;
+    }
+
+    const spot = lastSpot ? lastSpot.value : null;
+    const isManualSpot = !!spotSnap;
 
     // FUTURES — auto (старт + PnL), но ручной снапшот переопределяет
     const futuresSnap = futuresSnapshots.find((s) => s.snapshot_date === dateStr);
@@ -121,7 +137,7 @@ export async function getBalanceChartForUser(
       ? Number(futuresSnap.value_usd)
       : settings.futures_start_usd + cumulativePnl;
 
-    // SPREAD = |spot - futures|
+    // SPREAD = |spot - futures| (только если spot известен)
     const spread = spot !== null ? Math.abs(spot - futures) : null;
 
     points.push({
@@ -129,7 +145,7 @@ export async function getBalanceChartForUser(
       spot,
       futures,
       spread,
-      is_manual_spot: !!spotSnap,
+      is_manual_spot: isManualSpot,
       is_manual_futures: !!futuresSnap,
     });
   }
