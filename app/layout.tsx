@@ -67,6 +67,9 @@ export default async function RootLayout({
                 <Link href="/trades" className="text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors">
                   Сделки
                 </Link>
+                <Link href="/balance" className="text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors hidden sm:inline">
+                  Баланс
+                </Link>
                 <Link href="/manual" className="text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors hidden sm:inline">
                   Добавить
                 </Link>

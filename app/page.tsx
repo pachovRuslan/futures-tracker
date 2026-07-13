@@ -14,6 +14,7 @@ import {
 import Link from "next/link";
 import type { MonthlySummary, Trade } from "@/lib/types";
 import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+import BalanceChart from "@/components/BalanceChart";
 
 function fmt(n: number): string {
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -288,6 +289,9 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      {/* График баланса: спот vs фьючерс с целью */}
+      <BalanceChart />
 
       {/* График PnL по месяцам */}
       <div className="card p-5">
