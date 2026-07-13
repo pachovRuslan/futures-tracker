@@ -128,11 +128,16 @@ async function fetchClosedTrades(
         // Пробуем взять fee из undocumented полей, если Bybit их отдаёт.
         // Если нет — 0 (closedPnl уже включает вычет комиссии).
         const fee = item.execFee ? Number(item.execFee) : 0;
+        // Bybit V5 /v5/position/closed-pnl: side = side ЗАКРЫВАЮЩЕГО ордера.
+        //   Buy  = закрыли SHORT позицию → side должно быть "short"
+        //   Sell = закрыли LONG позицию  → side должно быть "long"
+        // Поэтому маппинг ИНВЕРТИРОВАН относительно обычной конвенции.
+        const side: "long" | "short" = item.side === "Buy" ? "short" : "long";
         return {
           exchange: "bybit" as const,
           external_id: item.orderId,
           symbol: item.symbol,
-          side: item.side === "Buy" ? "long" : "short",
+          side,
           qty: Number(item.qty),
           entry_price: Number(item.avgEntryPrice),
           close_price: Number(item.avgExitPrice),
