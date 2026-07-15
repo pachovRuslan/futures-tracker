@@ -28,32 +28,30 @@ interface BitunixPosition {
 /**
  * Нормализация side из ответа Bitunix в наш union "long" | "short".
  *
- * ВАЖНО: Bitunix /api/v1/futures/position/get_history_positions возвращает
- * side как сторону ОРДЕРА, которым позиция была ЗАКРЫТА (не открыта).
- * Это типичное поведение для futures API:
- *   - LONG позиция закрывается SELL ордером → side=SELL → должно быть "long"
- *   - SHORT позиция закрывается BUY ордером → side=BUY → должно быть "short"
+ * ВАЖНОЕ УТОЧНЕНИЕ после сопоставления с реальными сделками пользователя:
  *
- * Поэтому маппинг ИНВЕРТИРОВАН относительно обычной конвенции BUY=long/SELL=short.
+ * Bitunix /api/v1/futures/position/get_history_positions возвращает side
+ * ОТКРЫВАЮЩЕГО ордера (стандартная конвенция), а не закрывающего:
+ *   - BUY  = открыли LONG позицию  → side должно быть "long"
+ *   - SELL = открыли SHORT позицию → side должно быть "short"
+ *
+ * Это отличается от Bybit, где side = закрывающий ордер (там инверсия).
+ *
+ * Подтверждение данными пользователя (сопоставление с интерфейсом Bitunix):
+ *   - GWEIUSDT: API→SELL, в трекере был Long (баг), должно быть Short ✓
+ *   - LABUSDT:  API→BUY,  в трекере был Short (баг), должно быть Long ✓
  *
  * Если значение не распознано — логируем warning и возвращаем "short"
- * (безопасный дефолт), но в raw сохраняется оригинальное значение для отладки.
+ * (безопасный дефолт).
  */
 function normalizeSide(rawSide: string): "long" | "short" {
   const s = String(rawSide).toUpperCase();
-  // SELL = закрыли LONG позицию → long
-  if (s === "SELL" || s === "2" || s === "CLOSELONG") {
+  // BUY = открыли LONG позицию → long
+  if (s === "BUY" || s === "1" || s === "LONG" || s === "OPENLONG" || s === "CLOSESHORT") {
     return "long";
   }
-  // BUY = закрыли SHORT позицию → short
-  if (s === "BUY" || s === "1" || s === "CLOSESHORT") {
-    return "short";
-  }
-  // Явные LONG/SHORT (если когда-нибудь появятся) — прямое соответствие
-  if (s === "LONG" || s === "OPENLONG") {
-    return "long";
-  }
-  if (s === "SHORT" || s === "OPENSHORT") {
+  // SELL = открыли SHORT позицию → short
+  if (s === "SELL" || s === "2" || s === "SHORT" || s === "OPENSHORT" || s === "CLOSELONG") {
     return "short";
   }
   console.warn(`[bitunix] unknown side value: ${JSON.stringify(rawSide)}, defaulting to short`);
