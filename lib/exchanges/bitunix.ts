@@ -134,7 +134,10 @@ async function fetchClosedTrades(
   const symbolsEnv = process.env.BITUNIX_SYMBOLS?.trim();
   const symbols = symbolsEnv ? symbolsEnv.split(",").map((s) => s.trim()) : [undefined];
 
-  const allTrades: SyncedTrade[] = [];
+  // Накапливаем ВСЕ сырые позиции со всех страниц и символов.
+  // Агрегацию по positionId делаем после сбора, чтобы поймать partials
+  // одной позиции даже если они разнесены по разным страницам/символам.
+  const allRawPositions: BitunixPosition[] = [];
 
   for (const symbol of symbols) {
     let skip = 0;
@@ -163,30 +166,91 @@ async function fetchClosedTrades(
         throw new Error(`Bitunix API error ${data.code}: ${data.msg}`);
       }
 
-      const trades: SyncedTrade[] = data.data.positionList.map((p) => ({
-        exchange: "bitunix" as const,
-        external_id: p.positionId,
-        symbol: p.symbol,
-        side: normalizeSide(p.side),
-        qty: Number(p.maxQty),
-        entry_price: Number(p.entryPrice),
-        close_price: Number(p.closePrice),
-        realized_pnl: Number(p.realizedPNL),
-        fee: Number(p.fee),
-        funding: Number(p.funding),
-        opened_at: toIso(p.ctime),
-        closed_at: toIso(p.mtime),
-        raw: p,
-      }));
+      // Накапливаем ВСЕ сырые позиции — агрегацию по positionId делаем
+      // после сбора всех страниц, чтобы поймать partials одной позиции
+      // даже если они разнесены по разным страницам пагинации.
+      allRawPositions.push(...data.data.positionList);
 
-      allTrades.push(...trades);
-      if (trades.length < limit) break;
+      if (data.data.positionList.length < limit) break;
       skip += limit;
     }
   }
 
+  // АГРЕГАЦИЯ PARTIALS ПО positionId.
+  //
+  // Проблема: если позиция закрыта частями (3 partial close-ордера),
+  // Bitunix отдаёт 3 записи с одинаковым positionId, но разными
+  // maxQty / closePrice / realizedPNL / fee / funding / mtime.
+  //
+  // Без агрегации:
+  //   - upsert по (user_id, exchange, external_id=positionId) перезаписывает
+  //     первую запись второй, второй третьей — остаётся только последний partial.
+  //   - ИЛИ если positionId разные для partials — видим 3 отдельные сделки.
+  //
+  // С агрегацией:
+  //   - Группируем по positionId.
+  //   - qty = sum(maxQty) — суммарный объём всех partials.
+  //   - realized_pnl = sum(realizedPNL).
+  //   - fee = sum(fee), funding = sum(funding).
+  //   - entry_price = entryPrice первой записи (одинаковая для всех partials).
+  //   - close_price = weighted average по qty (средневзвешенная цена закрытия).
+  //   - opened_at = min(ctime), closed_at = max(mtime).
+  //   - raw = { partials: [...], count: N } — сохраняем все partials для отладки.
+  //
+  // Если у Bitunix positionId разные для каждого partial — этот код не сработает,
+  // нужна будет эвристика по (symbol, ctime, side). Но по документации positionId
+  // должен быть одинаковым для всех partials одной позиции.
+  const positionMap = new Map<string, BitunixPosition[]>();
+  for (const p of allRawPositions) {
+    const key = p.positionId;
+    if (!positionMap.has(key)) positionMap.set(key, []);
+    positionMap.get(key)!.push(p);
+  }
+
+  const trades: SyncedTrade[] = Array.from(positionMap.entries()).map(
+    ([positionId, partials]) => {
+      // Сортируем по mtime — от первого закрытия к последнему.
+      partials.sort((a, b) => a.mtime - b.mtime);
+      const first = partials[0];
+
+      const totalQty = partials.reduce((acc, p) => acc + Number(p.maxQty), 0);
+      const totalPnl = partials.reduce((acc, p) => acc + Number(p.realizedPNL), 0);
+      const totalFee = partials.reduce((acc, p) => acc + Number(p.fee), 0);
+      const totalFunding = partials.reduce((acc, p) => acc + Number(p.funding), 0);
+
+      // close_price — средневзвешенная по qty. Если totalQty=0 (все partials
+      // с нулевым объёмом — странно, но defensively) — берём closePrice первой.
+      const weightedClose =
+        totalQty > 0
+          ? partials.reduce((acc, p) => acc + Number(p.closePrice) * Number(p.maxQty), 0) / totalQty
+          : Number(first.closePrice);
+
+      const minCtime = Math.min(...partials.map((p) => p.ctime));
+      const maxMtime = Math.max(...partials.map((p) => p.mtime));
+
+      return {
+        exchange: "bitunix" as const,
+        external_id: positionId,
+        symbol: first.symbol,
+        side: normalizeSide(first.side),
+        qty: totalQty,
+        entry_price: Number(first.entryPrice),
+        close_price: weightedClose,
+        realized_pnl: totalPnl,
+        fee: totalFee,
+        funding: totalFunding,
+        opened_at: toIso(minCtime),
+        closed_at: toIso(maxMtime),
+        // raw — массив всех partials, чтобы в БД сохранялась полная картина.
+        // Это полезно для отладки и для будущих доработок (например, отображения
+        // "закрыто в 3 ордера" в UI).
+        raw: { partials, count: partials.length },
+      };
+    }
+  );
+
   // Bitunix не использует курсор — nextCursor всегда null.
-  return { trades: allTrades, nextCursor: null };
+  return { trades, nextCursor: null };
 }
 
 async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
