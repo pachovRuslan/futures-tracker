@@ -1,51 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabaseClient } from "@/lib/supabase-server";
-
-/**
- * Проверка, что текущий пользователь — админ (т.е. есть в allowlist).
- * Согласно архитектуре, все из allowlist = админы (нет отдельного ADMIN_EMAILS).
- *
- * Возвращает user или null (с ответом 403).
- */
-async function requireAdmin() {
-  const supabase = await createServerSupabaseClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user?.email) {
-    return {
-      user: null,
-      error: NextResponse.json({ error: "Не авторизован" }, { status: 401 }),
-      supabase,
-    };
-  }
-
-  // Проверяем, что email в allowlist (БД или env fallback)
-  const { data: dbAllowlist } = await supabase
-    .from("allowed_emails")
-    .select("email");
-
-  const envAllowedEmails = (process.env.ALLOWED_EMAILS ?? "")
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
-
-  const isInDb = dbAllowlist?.some(
-    (row) => row.email.toLowerCase() === user.email!.toLowerCase()
-  );
-  const isInEnv = envAllowedEmails.includes(user.email.toLowerCase());
-
-  if (!isInDb && !isInEnv) {
-    return {
-      user: null,
-      error: NextResponse.json({ error: "Доступ запрещён" }, { status: 403 }),
-      supabase,
-    };
-  }
-
-  return { user, error: null, supabase };
-}
+import { requireAdmin } from "@/lib/admin";
 
 // GET /api/admin/allowlist — список всех email-ов в allowlist
 export async function GET() {

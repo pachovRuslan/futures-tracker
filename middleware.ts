@@ -10,6 +10,13 @@ const envAllowedEmails = (process.env.ALLOWED_EMAILS ?? "")
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean);
 
+// Список админов из env ADMIN_EMAILS — кто видит /admin и может управлять
+// allowlist. Это ОТДЕЛЬНЫЙ список от ALLOWED_EMAILS (который разрешает вход).
+const adminEmails = (process.env.ADMIN_EMAILS ?? "")
+  .split(",")
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
+
 // Путь /api/sync/cron дёргает Vercel cron с заголовком Authorization: Bearer.
 // Middleware его не трогает — авторизация внутри роута через CRON_SECRET.
 const CRON_PATH = "/api/sync/cron";
@@ -90,6 +97,21 @@ export async function middleware(request: NextRequest) {
     // Дополнительная проверка: если allowlist вообще пуст — показываем
     // понятную ошибку. Иначе — обычный /not-allowed.
     return NextResponse.redirect(new URL("/not-allowed", request.url));
+  }
+
+  // Защита админки: пути /admin и /api/admin/* требуют ADMIN_EMAILS.
+  // Если ADMIN_EMAILS не задан или текущий юзер не в нём — 403.
+  const isAdminPath =
+    request.nextUrl.pathname.startsWith("/admin") ||
+    request.nextUrl.pathname.startsWith("/api/admin");
+
+  if (isAdminPath) {
+    if (adminEmails.length === 0) {
+      return NextResponse.redirect(new URL("/not-allowed", request.url));
+    }
+    if (!adminEmails.includes(email)) {
+      return NextResponse.redirect(new URL("/not-allowed", request.url));
+    }
   }
 
   return supabaseResponse;
