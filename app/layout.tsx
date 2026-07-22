@@ -76,6 +76,9 @@ export default async function RootLayout({
                 <Link href="/connections" className="text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors hidden sm:inline">
                   Подключения
                 </Link>
+                <Link href="/admin" className="text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors hidden sm:inline">
+                  Админка
+                </Link>
 
                 <div className="flex items-center gap-2 pl-2 sm:pl-3 ml-1 border-l border-[var(--color-border)]">
                   <ThemeToggle />
