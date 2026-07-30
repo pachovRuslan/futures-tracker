@@ -69,8 +69,12 @@ export async function middleware(request: NextRequest) {
   }
 
   // Allowlist из БД — основной источник.
-  // Если БД недоступна или таблица пуста — fallback на env ALLOWED_EMAILS.
-  let isAllowed = false;
+  // env ALLOWED_EMAILS ВСЕГДА работает как дополнительный fallback поверх БД.
+  // Это защищает от ситуации: вы добавили email в БД через админку,
+  // но забыли добавить свой собственный — и потеряли доступ.
+  // С этим фиксом env-allowlist продолжает пускать вас, даже если в БД
+  // вашего email-а нет.
+  let isAllowed = envAllowedEmails.includes(email);
   try {
     const { data: dbAllowlist, error } = await supabase
       .from("allowed_emails")
@@ -78,24 +82,22 @@ export async function middleware(request: NextRequest) {
     if (error) throw error;
 
     if (dbAllowlist && dbAllowlist.length > 0) {
-      isAllowed = dbAllowlist.some((row) => row.email.toLowerCase() === email);
-    } else {
-      // Таблица пуста — используем env как fallback.
-      isAllowed = envAllowedEmails.includes(email);
+      // БД не пуста — проверяем email и в БД, и в env (объединение).
+      // Если email есть в любом из источников — пускаем.
+      isAllowed =
+        isAllowed || dbAllowlist.some((row) => row.email.toLowerCase() === email);
     }
+    // Если БД пуста — остаётся только env (уже установлен в isAllowed).
   } catch (err) {
     console.error(
       "[middleware] Ошибка чтения allowed_emails из БД, fallback на env:",
       err instanceof Error ? err.message : String(err)
     );
-    isAllowed = envAllowedEmails.includes(email);
+    // isAllowed уже установлен из env выше — оставляем как есть.
   }
 
   // FAIL-CLOSED: если allowlist пуст (ни в БД, ни в env) — никого не пускаем.
-  // Раньше пустой список означал «открытый вход для любого Google-аккаунта».
   if (!isAllowed) {
-    // Дополнительная проверка: если allowlist вообще пуст — показываем
-    // понятную ошибку. Иначе — обычный /not-allowed.
     return NextResponse.redirect(new URL("/not-allowed", request.url));
   }
 

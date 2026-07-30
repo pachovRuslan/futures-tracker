@@ -61,6 +61,16 @@ export default function AdminPage() {
   const loadAllowlist = useCallback(async () => {
     setLoading(true);
     const res = await fetch("/api/admin/allowlist");
+    // Если middleware нас редиректнул (например, на /not-allowed) —
+    // fetch возвращает HTML-страницу, а не JSON. Защищаемся от этого,
+    // чтобы не получить 'Unexpected token <' в UI.
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("loadAllowlist failed:", res.status, text.slice(0, 200));
+      setError(`Не удалось загрузить allowlist (HTTP ${res.status})`);
+      setLoading(false);
+      return;
+    }
     const data = await res.json();
     setAllowlist(data.allowlist ?? []);
     setLoading(false);
@@ -69,6 +79,13 @@ export default function AdminPage() {
   const loadUsers = useCallback(async () => {
     setLoading(true);
     const res = await fetch("/api/admin/users");
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("loadUsers failed:", res.status, text.slice(0, 200));
+      setError(`Не удалось загрузить пользователей (HTTP ${res.status})`);
+      setLoading(false);
+      return;
+    }
     const data = await res.json();
     setUsers(data.users ?? []);
     setLoading(false);
