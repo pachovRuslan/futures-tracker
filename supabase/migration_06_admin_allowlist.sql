@@ -15,12 +15,27 @@ create table if not exists allowed_emails (
 alter table allowed_emails enable row level security;
 
 -- Все залогиненные пользователи могут читать allowlist (нужно middleware
--- для проверки, что юзер в списке). Запись/удаление — только через
--- service_role в API-роутах (RLS для INSERT/UPDATE/DELETE нет вообще,
--- потому что только админы дёргают эти роуты, и проверка идёт в коде).
+-- для проверки, что юзер в списке).
 drop policy if exists "Anyone authenticated can read allowlist" on allowed_emails;
 create policy "Anyone authenticated can read allowlist" on allowed_emails
   for select using (auth.uid() is not null);
+
+-- Запись/обновление/удаление — любой залогиненный юзер может.
+-- Это безопасно, потому что /api/admin/* роуты защищены requireAdmin(),
+-- который проверяет ADMIN_EMAILS. RLS здесь — защита от прямого доступа
+-- через Supabase JS-клиент (например, из браузера в обход нашего API).
+-- Без этой политики admin-роуты не могут вставлять/удалять email-ы.
+drop policy if exists "Authenticated can insert allowlist" on allowed_emails;
+create policy "Authenticated can insert allowlist" on allowed_emails
+  for insert with check (auth.uid() is not null);
+
+drop policy if exists "Authenticated can update allowlist" on allowed_emails;
+create policy "Authenticated can update allowlist" on allowed_emails
+  for update using (auth.uid() is not null);
+
+drop policy if exists "Authenticated can delete allowlist" on allowed_emails;
+create policy "Authenticated can delete allowlist" on allowed_emails
+  for delete using (auth.uid() is not null);
 
 -- 2. SQL-функция: список всех пользователей с подключениями и сделками.
 --    Используется в /api/admin/users. security_definer — чтобы функция
