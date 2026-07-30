@@ -95,7 +95,17 @@ export default function AdminPage() {
         body: JSON.stringify({ email: newEmail, note: newNote || null }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Ошибка");
+      if (!res.ok) {
+        // data.error может быть строкой или объектом (например, от Supabase).
+        // Если объект — stringify, чтобы не получить [object Object] в UI.
+        const errMsg =
+          typeof data.error === "string"
+            ? data.error
+            : data.error
+            ? JSON.stringify(data.error)
+            : `HTTP ${res.status}`;
+        throw new Error(errMsg);
+      }
       setMsg(`✓ ${newEmail} добавлен в allowlist`);
       setNewEmail("");
       setNewNote("");
@@ -116,7 +126,13 @@ export default function AdminPage() {
     });
     const data = await res.json();
     if (!res.ok) {
-      setError(data.error ?? "Ошибка");
+      const errMsg =
+        typeof data.error === "string"
+          ? data.error
+          : data.error
+          ? JSON.stringify(data.error)
+          : `HTTP ${res.status}`;
+      setError(errMsg);
     } else {
       setMsg(`✓ ${email} удалён из allowlist`);
       await loadAllowlist();

@@ -27,14 +27,14 @@ export async function DELETE(
       .delete()
       .eq("email", email);
 
-    if (deleteError) throw deleteError;
+    if (deleteError) {
+      throw new Error(deleteError.message || JSON.stringify(deleteError));
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error("Admin allowlist delete error:", err instanceof Error ? err.message : String(err));
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error("Admin allowlist delete error:", errMsg);
+    return NextResponse.json({ error: errMsg }, { status: 500 });
   }
 }

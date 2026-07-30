@@ -81,14 +81,16 @@ export async function POST(req: NextRequest) {
       .select()
       .single();
 
-    if (insertError) throw insertError;
+    if (insertError) {
+      // Supabase возвращает ошибку как объект {message, code, details, hint}.
+      // Достаём message — это человекочитаемая строка.
+      throw new Error(insertError.message || JSON.stringify(insertError));
+    }
 
     return NextResponse.json({ ok: true, entry: data });
   } catch (err) {
-    console.error("Admin allowlist add error:", err instanceof Error ? err.message : String(err));
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error("Admin allowlist add error:", errMsg);
+    return NextResponse.json({ error: errMsg }, { status: 500 });
   }
 }
