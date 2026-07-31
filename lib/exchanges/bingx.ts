@@ -32,6 +32,21 @@ interface BingxPositionHistoryResponse {
     | null;
 }
 
+interface BingxIncomeItem {
+  symbol: string;
+  incomeType: string;
+  income: string;
+  asset: string;
+  time: number;
+  tranId: string;
+}
+
+interface BingxIncomeResponse {
+  code: number;
+  msg: string;
+  data: BingxIncomeItem[] | { incomeHistory: BingxIncomeItem[] } | null;
+}
+
 function sign(queryString: string, secret: string): string {
   return crypto.createHmac("sha256", secret).update(queryString).digest("hex");
 }
@@ -46,8 +61,7 @@ async function signedGet<T>(
   const allParams: Record<string, string> = { ...params, timestamp, recvWindow: "5000" };
 
   // Каноническая строка: параметры отсортированы по ключу, key=value&key=value.
-  // BingX требует, чтобы значения НЕ URL-encoding-овались перед подписью
-  // (кроме случаев со спецсимволами — у нас их нет в числах и символах).
+  // BingX требует, чтобы значения НЕ URL-encoding-овались перед подписью.
   const queryString = Object.keys(allParams)
     .sort()
     .map((k) => `${k}=${allParams[k]}`)
@@ -75,21 +89,83 @@ async function signedGet<T>(
 }
 
 /**
+ * Авто-обнаружение всех торгуемых символов пользователя через income endpoint.
+ *
+ * BingX /openApi/swap/v1/trade/positionHistory требует symbol обязательным —
+ * нельзя запросить «все сделки разом». Но перечислять все пары вручную неудобно,
+ * если их много.
+ *
+ * Решение: если BINGX_SYMBOLS не задан, вызываем /openApi/swap/v2/user/income
+ * (он НЕ требует symbol) и извлекаем уникальные символы из записей о доходах
+ * (PnL, фандинг, комиссии). Это даёт список всех пар, по которым у пользователя
+ * была активность в запрошенном периоде.
+ *
+ * Ограничение: income endpoint хранит данные только 3 месяца. Для периодов
+ * старше 3 месяцев авто-обнаружение не найдёт символы — тогда нужно
+ * заполнить BINGX_SYMBOLS вручную.
+ */
+async function discoverTradedSymbols(
+  credentials: ExchangeCredentials,
+  sinceMs: number,
+  untilMs: number
+): Promise<string[]> {
+  const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
+  const symbols = new Set<string>();
+
+  for (let windowEnd = untilMs; windowEnd > sinceMs; windowEnd -= THREE_MONTHS_MS) {
+    const windowStart = Math.max(windowEnd - THREE_MONTHS_MS, sinceMs);
+
+    try {
+      const data = await signedGet<BingxIncomeResponse>(
+        "/openApi/swap/v2/user/income",
+        {
+          startTime: String(windowStart),
+          endTime: String(windowEnd),
+          limit: "1000",
+        },
+        credentials
+      );
+
+      const records: BingxIncomeItem[] = data.data
+        ? Array.isArray(data.data)
+          ? data.data
+          : "incomeHistory" in data.data
+          ? data.data.incomeHistory ?? []
+          : []
+        : [];
+
+      for (const item of records) {
+        if (item.symbol) symbols.add(item.symbol);
+      }
+    } catch (err) {
+      console.warn(
+        `[bingx] discover symbols failed for window ${windowStart}-${windowEnd}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+
+  return Array.from(symbols);
+}
+
+/**
  * BingX: /openApi/swap/v1/trade/positionHistory
  *
  * Особенности (актуальная документация BingX, август 2026):
- *   - Эндпоинт: /openApi/swap/v1/trade/positionHistory (НЕ v2/user/positions/history,
- *     который использовался раньше — он не существует, BingX отдаёт 100400)
+ *   - Эндпоинт: /openApi/swap/v1/trade/positionHistory
  *   - symbol ОБЯЗАТЕЛЕН — нужно тянуть по одному символу за раз
  *   - startTs/endTs (НЕ startTime/endTime!) — максимальный span 3 месяца
  *   - Пагинация: pageIndex + pageSize (max 100)
  *   - positionId может превышать Number.MAX_SAFE_INTEGER — парсим как строку
  *   - Подпись: HMAC-SHA256, параметры отсортированы по ключу
  *
- * Список символов берётся из env BINGX_SYMBOLS (через запятую).
- * Если env пустой — берём только BTC-USDT как минимальный рабочий сценарий
- * (без symbol запрос невозможен). TODO: тянуть список всех контрактов через
- * /openApi/swap/v2/quote/contracts.
+ * Список символов:
+ *   - Если BINGX_SYMBOLS задан — используем его (формат BTC-USDT с дефисом)
+ *   - Если BINGX_SYMBOLS пустой — АВТО-ОБНАРУЖЕНИЕ всех торгуемых пар через
+ *     /openApi/swap/v2/user/income. Не требует ручного указания.
+ *     Ограничение: авто-обнаружение работает только за последние 3 месяца
+ *     (income endpoint хранит данные 3 месяца). Для более старых периодов
+ *     нужно заполнить BINGX_SYMBOLS.
  */
 async function fetchClosedTrades(
   credentials: ExchangeCredentials,
@@ -99,15 +175,27 @@ async function fetchClosedTrades(
   const until = opts?.untilMs ?? now;
   const since = opts?.sinceMs ?? now - 365 * 24 * 60 * 60 * 1000;
 
-  // BingX требует symbol обязательным. Берём список из env.
-  // Формат BingX: "BTC-USDT" (с дефисом), не "BTCUSDT" как у Bybit/Binance.
+  // Определяем список символов для синка
   const symbolsEnv = process.env.BINGX_SYMBOLS?.trim();
-  const symbols = symbolsEnv
-    ? symbolsEnv.split(",").map((s) => s.trim()).filter(Boolean)
-    : ["BTC-USDT"]; // минимальный дефолт
+  let symbols: string[];
+
+  if (symbolsEnv) {
+    // Ручной список из env — формат BTC-USDT (с дефисом)
+    symbols = symbolsEnv.split(",").map((s) => s.trim()).filter(Boolean);
+  } else {
+    // Авто-обнаружение — находим все пары, по которым была активность
+    symbols = await discoverTradedSymbols(credentials, since, until);
+    if (symbols.length === 0) {
+      console.warn(
+        "[bingx] авто-обнаружение символов не нашло ни одной пары. " +
+          "Заполните BINGX_SYMBOLS в env (формат BTC-USDT,ETH-USDT,...)"
+      );
+      return { trades: [], nextCursor: null };
+    }
+    console.log(`[bingx] авто-обнаружено ${symbols.length} символов: ${symbols.join(", ")}`);
+  }
 
   // BingX отдаёт максимум 3 месяца за один запрос.
-  // Нарезаем на 3-месячные окна.
   const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
   const allTrades: SyncedTrade[] = [];
 
@@ -115,7 +203,6 @@ async function fetchClosedTrades(
     for (let windowEnd = until; windowEnd > since; windowEnd -= THREE_MONTHS_MS) {
       const windowStart = Math.max(windowEnd - THREE_MONTHS_MS, since);
 
-      // Пагинация по pageIndex.
       for (let pageIndex = 1; pageIndex <= 50; pageIndex++) {
         const data = await signedGet<BingxPositionHistoryResponse>(
           "/openApi/swap/v1/trade/positionHistory",
@@ -129,8 +216,6 @@ async function fetchClosedTrades(
           credentials
         );
 
-        // BingX возвращает data в одном из двух форматов (расхождение между
-        // старой и новой схемой). Обрабатываем оба.
         const records: BingxPositionItem[] = data.data
           ? "positionHistory" in data.data
             ? data.data.positionHistory ?? []
@@ -143,7 +228,7 @@ async function fetchClosedTrades(
 
         const trades: SyncedTrade[] = records.map((p) => ({
           exchange: "bingx" as const,
-          external_id: p.positionId, // строка, не число — сохраняем точность
+          external_id: p.positionId,
           symbol: p.symbol,
           side: p.positionSide === "LONG" ? "long" : "short",
           qty: Number(p.positionAmt),
@@ -163,20 +248,16 @@ async function fetchClosedTrades(
     }
   }
 
-  // BingX не использует курсор — nextCursor всегда null.
   return { trades: allTrades, nextCursor: null };
 }
 
 async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
-  // Простой запрос с минимальным окном — если ключ невалиден, BingX вернёт
-  // ошибку авторизации. Если ключ валиден, но символа нет — вернёт пустой
-  // data.positionHistory, что нам и нужно для проверки.
   const now = Date.now();
   await signedGet<BingxPositionHistoryResponse>(
     "/openApi/swap/v1/trade/positionHistory",
     {
       symbol: "BTC-USDT",
-      startTs: String(now - 60 * 1000), // последняя минута
+      startTs: String(now - 60 * 1000),
       endTs: String(now),
       pageIndex: "1",
       pageSize: "1",
