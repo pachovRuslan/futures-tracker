@@ -4,47 +4,21 @@ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
 
 const BASE_URL = "https://open-api.bingx.com";
 
-interface BingxPositionItem {
-  positionId: string; // int64 как строка — может превышать Number.MAX_SAFE_INTEGER
-  symbol: string;
-  isolated: boolean;
-  positionSide: "LONG" | "SHORT";
-  openTime: number; // ms epoch
-  updateTime: number; // ms epoch — для закрытых ≈ время закрытия
-  avgPrice: string;
-  avgClosePrice: string;
-  realisedProfit: string;
-  netProfit: string;
-  positionAmt: string;
-  closePositionAmt: string;
-  leverage: number;
-  closeAllPositions: boolean;
-  positionCommission: string;
-  totalFunding: string;
-}
-
-interface BingxPositionHistoryResponse {
-  code: number;
-  msg: string;
-  data:
-    | { positionHistory: BingxPositionItem[] }   // CCXT-стиль (старая схема)
-    | { list: BingxPositionItem[]; total: number } // AI-skill стиль (новая схема)
-    | null;
-}
-
 interface BingxIncomeItem {
   symbol: string;
-  incomeType: string;
+  incomeType: "REALIZED_PNL" | "TRADING_FEE" | "FUNDING_FEE" | "TRANSFER" | string;
   income: string;
   asset: string;
-  time: number;
+  info: string; // "Sell to Close", "Buy to Close", "Position opening fee", "Funding Fee", ...
+  time: number; // ms epoch
   tranId: string;
+  tradeId: string;
 }
 
 interface BingxIncomeResponse {
   code: number;
   msg: string;
-  data: BingxIncomeItem[] | { incomeHistory: BingxIncomeItem[] } | null;
+  data: BingxIncomeItem[] | null;
 }
 
 function sign(queryString: string, secret: string): string {
@@ -60,8 +34,6 @@ async function signedGet<T>(
   const timestamp = Date.now().toString();
   const allParams: Record<string, string> = { ...params, timestamp, recvWindow: "5000" };
 
-  // Каноническая строка: параметры отсортированы по ключу, key=value&key=value.
-  // BingX требует, чтобы значения НЕ URL-encoding-овались перед подписью.
   const queryString = Object.keys(allParams)
     .sort()
     .map((k) => `${k}=${allParams[k]}`)
@@ -89,83 +61,38 @@ async function signedGet<T>(
 }
 
 /**
- * Авто-обнаружение всех торгуемых символов пользователя через income endpoint.
+ * Определяет сторону позиции (long/short) по полю `info` из income endpoint.
  *
- * BingX /openApi/swap/v1/trade/positionHistory требует symbol обязательным —
- * нельзя запросить «все сделки разом». Но перечислять все пары вручную неудобно,
- * если их много.
- *
- * Решение: если BINGX_SYMBOLS не задан, вызываем /openApi/swap/v2/user/income
- * (он НЕ требует symbol) и извлекаем уникальные символы из записей о доходах
- * (PnL, фандинг, комиссии). Это даёт список всех пар, по которым у пользователя
- * была активность в запрошенном периоде.
- *
- * Ограничение: income endpoint хранит данные только 3 месяца. Для периодов
- * старше 3 месяцев авто-обнаружение не найдёт символы — тогда нужно
- * заполнить BINGX_SYMBOLS вручную.
+ * BingX income отдаёт info:
+ *   - "Sell to Close" — продали, чтобы закрыть → позиция была LONG
+ *   - "Buy to Close"  — откупили, чтобы закрыть → позиция была SHORT
+ *   - "Position opening fee" / "Position closing fee" / "Funding Fee" —
+ *     не определяют сторону, но можно взять с того же tradeId, где есть
+ *     REALIZED_PNL с "Sell/Buy to Close".
  */
-async function discoverTradedSymbols(
-  credentials: ExchangeCredentials,
-  sinceMs: number,
-  untilMs: number
-): Promise<string[]> {
-  const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
-  const symbols = new Set<string>();
-
-  for (let windowEnd = untilMs; windowEnd > sinceMs; windowEnd -= THREE_MONTHS_MS) {
-    const windowStart = Math.max(windowEnd - THREE_MONTHS_MS, sinceMs);
-
-    try {
-      const data = await signedGet<BingxIncomeResponse>(
-        "/openApi/swap/v2/user/income",
-        {
-          startTime: String(windowStart),
-          endTime: String(windowEnd),
-          limit: "1000",
-        },
-        credentials
-      );
-
-      const records: BingxIncomeItem[] = data.data
-        ? Array.isArray(data.data)
-          ? data.data
-          : "incomeHistory" in data.data
-          ? data.data.incomeHistory ?? []
-          : []
-        : [];
-
-      for (const item of records) {
-        if (item.symbol) symbols.add(item.symbol);
-      }
-    } catch (err) {
-      console.warn(
-        `[bingx] discover symbols failed for window ${windowStart}-${windowEnd}:`,
-        err instanceof Error ? err.message : String(err)
-      );
-    }
-  }
-
-  return Array.from(symbols);
+function sideFromInfo(info: string): "long" | "short" | null {
+  const lower = info.toLowerCase();
+  if (lower.includes("sell to close")) return "long";
+  if (lower.includes("buy to close")) return "short";
+  return null;
 }
 
 /**
- * BingX: /openApi/swap/v1/trade/positionHistory
+ * BingX: /openApi/swap/v2/user/income
  *
- * Особенности (актуальная документация BingX, август 2026):
- *   - Эндпоинт: /openApi/swap/v1/trade/positionHistory
- *   - symbol ОБЯЗАТЕЛЕН — нужно тянуть по одному символу за раз
- *   - startTs/endTs (НЕ startTime/endTime!) — максимальный span 3 месяца
- *   - Пагинация: pageIndex + pageSize (max 100)
- *   - positionId может превышать Number.MAX_SAFE_INTEGER — парсим как строку
- *   - Подпись: HMAC-SHA256, параметры отсортированы по ключу
+ * ВАЖНО: используем income endpoint, а НЕ positionHistory.
+ * positionHistory (/openApi/swap/v1/trade/positionHistory) у некоторых
+ * аккаунтов возвращает пустой массив, хотя сделки есть (подтверждено
+ * диагностикой на боевом аккаунте). BingX не объясняет почему.
  *
- * Список символов:
- *   - Если BINGX_SYMBOLS задан — используем его (формат BTC-USDT с дефисом)
- *   - Если BINGX_SYMBOLS пустой — АВТО-ОБНАРУЖЕНИЕ всех торгуемых пар через
- *     /openApi/swap/v2/user/income. Не требует ручного указания.
- *     Ограничение: авто-обнаружение работает только за последние 3 месяца
- *     (income endpoint хранит данные 3 месяца). Для более старых периодов
- *     нужно заполнить BINGX_SYMBOLS.
+ * income endpoint отдаёт ВСЕ доходы: REALIZED_PNL, TRADING_FEE, FUNDING_FEE.
+ * Группируем по tradeId — каждая закрытая позиция имеет уникальный tradeId.
+ * Извлекаем side из поля info ("Sell to Close" → long, "Buy to Close" → short).
+ *
+ * Ограничения:
+ *   - Хранение данных: 3 месяца
+ *   - Пагинация: limit (max 1000), без offset — нужно тянуть по времени
+ *   - НЕ требует symbol — возвращает все пары
  */
 async function fetchClosedTrades(
   credentials: ExchangeCredentials,
@@ -175,106 +102,147 @@ async function fetchClosedTrades(
   const until = opts?.untilMs ?? now;
   const since = opts?.sinceMs ?? now - 365 * 24 * 60 * 60 * 1000;
 
-  // Определяем список символов для синка
-  const symbolsEnv = process.env.BINGX_SYMBOLS?.trim();
-  let symbols: string[];
+  // BingX income хранит данные только 3 месяца. Если since старше 3 месяцев —
+  // ограничиваем, чтобы не получить пустые ответы за старые периоды.
+  const threeMonthsAgo = now - 90 * 24 * 60 * 60 * 1000;
+  const effectiveSince = Math.max(since, threeMonthsAgo);
 
-  if (symbolsEnv) {
-    // Ручной список из env — формат BTC-USDT (с дефисом)
-    symbols = symbolsEnv.split(",").map((s) => s.trim()).filter(Boolean);
-  } else {
-    // Авто-обнаружение — находим все пары, по которым была активность
-    symbols = await discoverTradedSymbols(credentials, since, until);
-    if (symbols.length === 0) {
+  // Нарезаем на 7-дневные окна — в каждом окне тянем до 1000 записей.
+  // 7 дней — безопасно, даже активный трейдер не сделает 1000 сделок за неделю.
+  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  const allIncome: BingxIncomeItem[] = [];
+
+  for (let windowEnd = until; windowEnd > effectiveSince; windowEnd -= SEVEN_DAYS_MS) {
+    const windowStart = Math.max(windowEnd - SEVEN_DAYS_MS, effectiveSince);
+
+    const data = await signedGet<BingxIncomeResponse>(
+      "/openApi/swap/v2/user/income",
+      {
+        startTime: String(windowStart),
+        endTime: String(windowEnd),
+        limit: "1000",
+      },
+      credentials
+    );
+
+    const records = data.data ?? [];
+    if (records.length === 0) continue;
+
+    allIncome.push(...records);
+
+    // Если вернулось ровно 1000 — возможно, есть ещё. Дробим окно.
+    // Но для большинства случаев 1000 за неделю — это много, и можно идти дальше.
+    if (records.length === 1000) {
       console.warn(
-        "[bingx] авто-обнаружение символов не нашло ни одной пары. " +
-          "Заполните BINGX_SYMBOLS в env (формат BTC-USDT,ETH-USDT,...)"
+        `[bingx] income window ${windowStart}-${windowEnd} returned 1000 records — possible truncation`
       );
-      return { trades: [], nextCursor: null };
     }
-    console.log(`[bingx] авто-обнаружено ${symbols.length} символов: ${symbols.join(", ")}`);
   }
 
-  // BingX отдаёт максимум 3 месяца за один запрос.
-  const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
-  const allTrades: SyncedTrade[] = [];
+  console.log(`[bingx] income: ${allIncome.length} records total`);
 
-  for (const symbol of symbols) {
-    let symbolTradesCount = 0;
-    for (let windowEnd = until; windowEnd > since; windowEnd -= THREE_MONTHS_MS) {
-      const windowStart = Math.max(windowEnd - THREE_MONTHS_MS, since);
+  // Группируем по tradeId. Каждая закрытая позиция имеет REALIZED_PNL запись
+  // с info "Sell to Close" или "Buy to Close". Это маркер закрытия.
+  // Все другие записи (TRADING_FEE, FUNDING_FEE) с тем же tradeId относятся
+  // к этой же позиции — суммируем их.
+  const tradesMap = new Map<string, {
+    symbol: string;
+    side: "long" | "short";
+    realized_pnl: number;
+    fee: number;
+    funding: number;
+    closed_at: number;
+    opened_at: number | null;
+  }>();
 
-      for (let pageIndex = 1; pageIndex <= 50; pageIndex++) {
-        const data = await signedGet<BingxPositionHistoryResponse>(
-          "/openApi/swap/v1/trade/positionHistory",
-          {
-            symbol,
-            startTs: String(windowStart),
-            endTs: String(windowEnd),
-            pageIndex: String(pageIndex),
-            pageSize: "100",
-          },
-          credentials
-        );
+  // Сначала найдём все REALIZED_PNL — это маркеры закрытых позиций.
+  for (const item of allIncome) {
+    if (item.incomeType !== "REALIZED_PNL") continue;
 
-        // Debug: логируем сырую структуру data для первого запроса каждого символа.
-        // Это поможет понять, что реально отдаёт BingX.
-        if (pageIndex === 1 && windowEnd === until) {
-          const dataStr = JSON.stringify(data.data).slice(0, 500);
-          console.log(`[bingx] ${symbol} raw data:`, dataStr);
-          console.log(`[bingx] ${symbol} data keys:`, data.data ? Object.keys(data.data) : "null");
+    // tradeId имеет формат "{positionId}_{accountId}_{orderId}" — берём первую часть как positionId
+    const positionId = item.tradeId.split("_")[0];
+    const side = sideFromInfo(item.info);
+    if (!side) continue; // не REALIZED_PNL с close-marker — пропускаем
+
+    tradesMap.set(item.tradeId, {
+      symbol: item.symbol,
+      side,
+      realized_pnl: Number(item.income),
+      fee: 0,
+      funding: 0,
+      closed_at: item.time,
+      opened_at: null,
+    });
+  }
+
+  // Теперь добавляем TRADING_FEE и FUNDING_FEE к соответствующим позициям.
+  // Сопоставляем по tradeId (если есть) или по symbol+time.
+  for (const item of allIncome) {
+    if (item.incomeType === "REALIZED_PNL") continue; // уже обработали
+
+    // Пробуем сопоставить по tradeId
+    const trade = tradesMap.get(item.tradeId);
+    if (trade) {
+      if (item.incomeType === "TRADING_FEE") {
+        trade.fee += Math.abs(Number(item.income));
+      } else if (item.incomeType === "FUNDING_FEE") {
+        trade.funding += Number(item.income);
+      }
+      // opened_at: берём минимальное время из всех записей
+      if (trade.opened_at === null || item.time < trade.opened_at) {
+        trade.opened_at = item.time;
+      }
+      continue;
+    }
+
+    // Если по tradeId не нашли — пробуем по tranId (иногда fee имеет тот же tranId)
+    // tranId формат: "{positionId}_{accountId}_{internalId}_{typeSuffix}"
+    const positionIdFromTran = item.tranId.split("_")[0];
+    for (const [tid, t] of tradesMap.entries()) {
+      if (tid.startsWith(positionIdFromTran + "_")) {
+        if (item.incomeType === "TRADING_FEE") {
+          t.fee += Math.abs(Number(item.income));
+        } else if (item.incomeType === "FUNDING_FEE") {
+          t.funding += Number(item.income);
         }
-
-        const records: BingxPositionItem[] = data.data
-          ? "positionHistory" in data.data
-            ? data.data.positionHistory ?? []
-            : "list" in data.data
-            ? data.data.list ?? []
-            : []
-          : [];
-
-        if (records.length === 0) break;
-
-        const trades: SyncedTrade[] = records.map((p) => ({
-          exchange: "bingx" as const,
-          external_id: p.positionId,
-          symbol: p.symbol,
-          side: p.positionSide === "LONG" ? "long" : "short",
-          qty: Number(p.positionAmt),
-          entry_price: Number(p.avgPrice),
-          close_price: Number(p.avgClosePrice),
-          realized_pnl: Number(p.realisedProfit),
-          fee: Math.abs(Number(p.positionCommission)),
-          funding: Number(p.totalFunding),
-          opened_at: new Date(p.openTime).toISOString(),
-          closed_at: new Date(p.updateTime).toISOString(),
-          raw: p,
-        }));
-
-        allTrades.push(...trades);
-        symbolTradesCount += trades.length;
-        if (records.length < 100) break;
+        if (t.opened_at === null || item.time < t.opened_at) {
+          t.opened_at = item.time;
+        }
+        break;
       }
     }
-    // Debug-лог: сколько сделок найдено по каждому символу.
-    console.log(`[bingx] ${symbol}: ${symbolTradesCount} trades`);
   }
 
-  console.log(`[bingx] total: ${allTrades.length} trades from ${symbols.length} symbols`);
+  // Преобразуем в SyncedTrade[]
+  const trades: SyncedTrade[] = Array.from(tradesMap.entries()).map(([tradeId, t]) => ({
+    exchange: "bingx" as const,
+    external_id: tradeId, // уникальный идентификатор
+    symbol: t.symbol,
+    side: t.side,
+    qty: null, // income endpoint не отдаёт qty — нужно отдельно тянуть positionHistory
+    entry_price: null, // нет в income
+    close_price: null, // нет в income
+    realized_pnl: t.realized_pnl,
+    fee: t.fee,
+    funding: t.funding,
+    opened_at: t.opened_at ? new Date(t.opened_at).toISOString() : null,
+    closed_at: new Date(t.closed_at).toISOString(),
+    raw: { tradeId, source: "income" },
+  }));
 
-  return { trades: allTrades, nextCursor: null };
+  console.log(`[bingx] grouped into ${trades.length} trades`);
+
+  return { trades, nextCursor: null };
 }
 
 async function testCredentials(credentials: ExchangeCredentials): Promise<void> {
   const now = Date.now();
-  await signedGet<BingxPositionHistoryResponse>(
-    "/openApi/swap/v1/trade/positionHistory",
+  await signedGet<BingxIncomeResponse>(
+    "/openApi/swap/v2/user/income",
     {
-      symbol: "BTC-USDT",
-      startTs: String(now - 60 * 1000),
-      endTs: String(now),
-      pageIndex: "1",
-      pageSize: "1",
+      startTime: String(now - 60 * 1000),
+      endTime: String(now),
+      limit: "1",
     },
     credentials
   );
