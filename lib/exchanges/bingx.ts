@@ -217,6 +217,14 @@ async function fetchClosedTrades(
           credentials
         );
 
+        // Debug: логируем сырую структуру data для первого запроса каждого символа.
+        // Это поможет понять, что реально отдаёт BingX.
+        if (pageIndex === 1 && windowEnd === until) {
+          const dataStr = JSON.stringify(data.data).slice(0, 500);
+          console.log(`[bingx] ${symbol} raw data:`, dataStr);
+          console.log(`[bingx] ${symbol} data keys:`, data.data ? Object.keys(data.data) : "null");
+        }
+
         const records: BingxPositionItem[] = data.data
           ? "positionHistory" in data.data
             ? data.data.positionHistory ?? []
@@ -249,8 +257,6 @@ async function fetchClosedTrades(
       }
     }
     // Debug-лог: сколько сделок найдено по каждому символу.
-    // Если 0 — BingX positionHistory не имеет данных по этой паре
-    // (возможно, сделки были старше года, или пары нет в perp futures).
     console.log(`[bingx] ${symbol}: ${symbolTradesCount} trades`);
   }
 
