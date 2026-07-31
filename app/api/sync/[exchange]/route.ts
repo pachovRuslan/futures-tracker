@@ -74,12 +74,20 @@ export async function GET(
       // nextCursor !== null. Большинство адаптеров возвращает nextCursor=null
       // сразу (проходят все страницы внутри одного вызова), но Bybit
       // потенциально может вернуть курсор для продолжения.
+      let pageTradesCount = 0;
+      let firstPageSample: unknown = null;
       for (let page = 0; page < 100; page++) {
         const { trades, nextCursor } = await adapter.fetchClosedTrades(credentials, {
           sinceMs,
           untilMs: now,
           cursor,
         });
+
+        // Debug: сохраняем sample первой страницы для диагностики
+        if (page === 0 && trades.length > 0 && firstPageSample === null) {
+          firstPageSample = trades[0];
+        }
+        pageTradesCount += trades.length;
 
         if (trades.length > 0) {
           const rows = trades.map((t) => ({ ...t, user_id: userId }));
@@ -92,6 +100,12 @@ export async function GET(
 
         if (!nextCursor) break;
         cursor = nextCursor;
+      }
+      // Debug-лог в ответ API — покажет, сколько сделок нашёл адаптер
+      // и пример структуры первой сделки.
+      console.log(`[sync/${exchange}] user=${userId} found=${pageTradesCount} upserted=${userUpserted}`);
+      if (pageTradesCount === 0) {
+        console.log(`[sync/${exchange}] adapter returned 0 trades — check API response structure`);
       }
       return userUpserted;
     });
@@ -112,6 +126,17 @@ export async function GET(
       exchange,
       ...summary,
       ...(userError ? { error: userError } : {}),
+      // Debug-инфо для диагностики — показывает, сколько сделок нашёл
+      // адаптер vs сколько записано в БД. Если found > 0 но upserted = 0 —
+      // проблема в upsert. Если found = 0 — проблема в адаптере/ответе API.
+      debug: {
+        targetsCount: targets.length,
+        results: results.map((r) => ({
+          userId: r.userId.slice(0, 8),
+          upserted: r.upserted,
+          error: r.error?.slice(0, 200),
+        })),
+      },
     });
   } catch (err) {
     // Логируем только сообщение, без полного объекта — в err может быть
