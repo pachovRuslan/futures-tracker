@@ -200,6 +200,7 @@ async function fetchClosedTrades(
   const allTrades: SyncedTrade[] = [];
 
   for (const symbol of symbols) {
+    let symbolTradesCount = 0;
     for (let windowEnd = until; windowEnd > since; windowEnd -= THREE_MONTHS_MS) {
       const windowStart = Math.max(windowEnd - THREE_MONTHS_MS, since);
 
@@ -243,10 +244,17 @@ async function fetchClosedTrades(
         }));
 
         allTrades.push(...trades);
+        symbolTradesCount += trades.length;
         if (records.length < 100) break;
       }
     }
+    // Debug-лог: сколько сделок найдено по каждому символу.
+    // Если 0 — BingX positionHistory не имеет данных по этой паре
+    // (возможно, сделки были старше года, или пары нет в perp futures).
+    console.log(`[bingx] ${symbol}: ${symbolTradesCount} trades`);
   }
+
+  console.log(`[bingx] total: ${allTrades.length} trades from ${symbols.length} symbols`);
 
   return { trades: allTrades, nextCursor: null };
 }
