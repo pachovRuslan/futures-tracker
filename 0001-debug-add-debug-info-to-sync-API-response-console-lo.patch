@@ -1,0 +1,88 @@
+From 612621341b5bdc60ae5f4a3913919824ae8ad056 Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Fri, 31 Jul 2026 21:31:17 +0000
+Subject: [PATCH] debug: add debug info to sync API response + console logs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Добавлен debug-блок в JSON-ответ /api/sync/[exchange]:
+  debug: {
+    targetsCount: N,
+    results: [{ userId, upserted, error }]
+  }
+
+И console.log в route handler:
+  [sync/bingx] user=XXX found=N upserted=M
+  [sync/bingx] adapter returned 0 trades — check API response structure
+
+Это поможет диагностировать, почему BingX sync возвращает 200 OK, но 0 сделок:
+- Если found=0 — адаптер не нашёл сделки (проблема в API/парсинге)
+- Если found>0, upserted=0 — проблема в upsert в БД
+
+Чтобы увидеть — откройте DevTools → Network → клик на sync?nxtPexchange=bingx
+→ вкладка Response → там будет JSON с debug-блоком.
+---
+ app/api/sync/[exchange]/route.ts | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/app/api/sync/[exchange]/route.ts b/app/api/sync/[exchange]/route.ts
+index d6bda90..f569c50 100644
+--- a/app/api/sync/[exchange]/route.ts
++++ b/app/api/sync/[exchange]/route.ts
+@@ -74,6 +74,8 @@ export async function GET(
+       // nextCursor !== null. Большинство адаптеров возвращает nextCursor=null
+       // сразу (проходят все страницы внутри одного вызова), но Bybit
+       // потенциально может вернуть курсор для продолжения.
++      let pageTradesCount = 0;
++      let firstPageSample: unknown = null;
+       for (let page = 0; page < 100; page++) {
+         const { trades, nextCursor } = await adapter.fetchClosedTrades(credentials, {
+           sinceMs,
+@@ -81,6 +83,12 @@ export async function GET(
+           cursor,
+         });
+ 
++        // Debug: сохраняем sample первой страницы для диагностики
++        if (page === 0 && trades.length > 0 && firstPageSample === null) {
++          firstPageSample = trades[0];
++        }
++        pageTradesCount += trades.length;
++
+         if (trades.length > 0) {
+           const rows = trades.map((t) => ({ ...t, user_id: userId }));
+           const { error } = await supabase
+@@ -93,6 +101,12 @@ export async function GET(
+         if (!nextCursor) break;
+         cursor = nextCursor;
+       }
++      // Debug-лог в ответ API — покажет, сколько сделок нашёл адаптер
++      // и пример структуры первой сделки.
++      console.log(`[sync/${exchange}] user=${userId} found=${pageTradesCount} upserted=${userUpserted}`);
++      if (pageTradesCount === 0) {
++        console.log(`[sync/${exchange}] adapter returned 0 trades — check API response structure`);
++      }
+       return userUpserted;
+     });
+ 
+@@ -112,6 +126,17 @@ export async function GET(
+       exchange,
+       ...summary,
+       ...(userError ? { error: userError } : {}),
++      // Debug-инфо для диагностики — показывает, сколько сделок нашёл
++      // адаптер vs сколько записано в БД. Если found > 0 но upserted = 0 —
++      // проблема в upsert. Если found = 0 — проблема в адаптере/ответе API.
++      debug: {
++        targetsCount: targets.length,
++        results: results.map((r) => ({
++          userId: r.userId.slice(0, 8),
++          upserted: r.upserted,
++          error: r.error?.slice(0, 200),
++        })),
++      },
+     });
+   } catch (err) {
+     // Логируем только сообщение, без полного объекта — в err может быть
+-- 
+2.47.3
+
