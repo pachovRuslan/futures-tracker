@@ -103,9 +103,13 @@ export async function middleware(request: NextRequest) {
 
   // Защита админки: пути /admin и /api/admin/* требуют ADMIN_EMAILS.
   // Если ADMIN_EMAILS не задан или текущий юзер не в нём — 403.
+  // ВАЖНО: /api/debug/* — временные debug-эндпоинты, доступны любому
+  // залогиненному юзеру (проверка внутри самого роута). Не подпадают
+  // под admin-защиту.
   const isAdminPath =
-    request.nextUrl.pathname.startsWith("/admin") ||
-    request.nextUrl.pathname.startsWith("/api/admin");
+    (request.nextUrl.pathname.startsWith("/admin") ||
+     request.nextUrl.pathname.startsWith("/api/admin")) &&
+    !request.nextUrl.pathname.startsWith("/api/debug");
 
   if (isAdminPath) {
     if (adminEmails.length === 0) {
