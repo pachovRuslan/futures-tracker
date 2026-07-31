@@ -39,11 +39,11 @@ export async function GET() {
     const apiKey = decrypt(connection.api_key_encrypted);
     const apiSecret = decrypt(connection.api_secret_encrypted);
 
-    // Делаем запрос к BingX positionHistory для BTC-USDT за последние 3 месяца
     const now = Date.now();
     const threeMonthsAgo = now - 90 * 24 * 60 * 60 * 1000;
 
-    const params: Record<string, string> = {
+    // === Запрос 1: positionHistory для BTC-USDT ===
+    const positionParams: Record<string, string> = {
       symbol: "BTC-USDT",
       startTs: String(threeMonthsAgo),
       endTs: String(now),
@@ -52,42 +52,63 @@ export async function GET() {
       timestamp: String(now),
       recvWindow: "5000",
     };
-
-    // Подпись (как в bingx.ts)
-    const queryString = Object.keys(params)
+    const positionQs = Object.keys(positionParams)
       .sort()
-      .map((k) => `${k}=${params[k]}`)
+      .map((k) => `${k}=${positionParams[k]}`)
       .join("&");
-    const signature = crypto.createHmac("sha256", apiSecret).update(queryString).digest("hex");
+    const positionSig = crypto.createHmac("sha256", apiSecret).update(positionQs).digest("hex");
+    const positionUrl = `https://open-api.bingx.com/openApi/swap/v1/trade/positionHistory?${positionQs}&signature=${positionSig}`;
 
-    const url = `https://open-api.bingx.com/openApi/swap/v1/trade/positionHistory?${queryString}&signature=${signature}`;
-
-    const res = await fetch(url, {
+    const positionRes = await fetch(positionUrl, {
       method: "GET",
-      headers: {
-        "X-BX-APIKEY": apiKey,
-        "X-SOURCE-KEY": "BX-AI-SKILL",
-      },
+      headers: { "X-BX-APIKEY": apiKey, "X-SOURCE-KEY": "BX-AI-SKILL" },
     });
-
-    const responseText = await res.text();
-    let responseJson: unknown;
+    const positionText = await positionRes.text();
+    let positionJson: unknown;
     try {
-      responseJson = JSON.parse(responseText);
+      positionJson = JSON.parse(positionText);
     } catch {
-      responseJson = { parseError: "Response is not JSON", raw: responseText.slice(0, 1000) };
+      positionJson = { parseError: "not JSON", raw: positionText.slice(0, 500) };
+    }
+
+    // === Запрос 2: income endpoint — показывает ВСЕ доходы (PnL, фандинг, комиссии) ===
+    // НЕ требует symbol — возвращает всё за период
+    const incomeParams: Record<string, string> = {
+      startTime: String(threeMonthsAgo),
+      endTime: String(now),
+      limit: "50",
+      timestamp: String(now),
+      recvWindow: "5000",
+    };
+    const incomeQs = Object.keys(incomeParams)
+      .sort()
+      .map((k) => `${k}=${incomeParams[k]}`)
+      .join("&");
+    const incomeSig = crypto.createHmac("sha256", apiSecret).update(incomeQs).digest("hex");
+    const incomeUrl = `https://open-api.bingx.com/openApi/swap/v2/user/income?${incomeQs}&signature=${incomeSig}`;
+
+    const incomeRes = await fetch(incomeUrl, {
+      method: "GET",
+      headers: { "X-BX-APIKEY": apiKey, "X-SOURCE-KEY": "BX-AI-SKILL" },
+    });
+    const incomeText = await incomeRes.text();
+    let incomeJson: unknown;
+    try {
+      incomeJson = JSON.parse(incomeText);
+    } catch {
+      incomeJson = { parseError: "not JSON", raw: incomeText.slice(0, 500) };
     }
 
     return NextResponse.json({
-      request: {
-        url,
-        method: "GET",
-        params,
+      positionHistory: {
+        url: positionUrl,
+        status: positionRes.status,
+        body: positionJson,
       },
-      response: {
-        status: res.status,
-        statusText: res.statusText,
-        body: responseJson,
+      income: {
+        url: incomeUrl,
+        status: incomeRes.status,
+        body: incomeJson,
       },
     });
   } catch (err) {
