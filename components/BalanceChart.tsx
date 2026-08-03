@@ -87,7 +87,7 @@ export default function BalanceChart() {
   const goal = data?.settings.goal_usd ?? null;
 
   return (
-    <div className="card p-5">
+    <div>
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
           <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">

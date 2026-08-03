@@ -16,6 +16,12 @@ import type { MonthlySummary, Trade } from "@/lib/types";
 import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 import BalanceChart from "@/components/BalanceChart";
 
+const ALL_EXCHANGES_WITH_MANUAL = [...EXCHANGES, "manual"] as const;
+type FilterableExchange = (typeof ALL_EXCHANGES_WITH_MANUAL)[number];
+
+const FILTER_STORAGE_KEY = "futures-tracker-exchange-filter";
+const GRAPH_TAB_STORAGE_KEY = "futures-tracker-graph-tab";
+
 function fmt(n: number): string {
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
 }
@@ -29,19 +35,13 @@ function fmtDate(iso: string): string {
   });
 }
 
-function fmtFee(fee: number, exchange: string): string {
-  if (exchange === "bybit" && fee === 0) return "—";
-  return fee.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
-}
-
 function PnlValue({ value, size = "md" }: { value: number; size?: "md" | "lg" | "xl" }) {
   const positive = value >= 0;
   const sizeClass =
-    size === "xl" ? "text-5xl" : size === "lg" ? "text-2xl" : "text-xl";
-  const glowClass = size === "xl" ? (positive ? "glow-profit" : "glow-loss") : "";
+    size === "xl" ? "text-4xl" : size === "lg" ? "text-2xl" : "text-xl";
   return (
     <span
-      className={`font-mono-tabular font-semibold ${sizeClass} ${glowClass} ${
+      className={`font-mono-tabular font-semibold ${sizeClass} ${
         positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
       }`}
     >
@@ -82,6 +82,34 @@ function SkeletonCard() {
   );
 }
 
+/**
+ * Загрузка выбранных бирж из localStorage.
+ * По умолчанию все выбраны.
+ */
+function loadSelectedExchanges(): Set<FilterableExchange> {
+  if (typeof window === "undefined") return new Set(ALL_EXCHANGES_WITH_MANUAL);
+  try {
+    const saved = localStorage.getItem(FILTER_STORAGE_KEY);
+    if (!saved) return new Set(ALL_EXCHANGES_WITH_MANUAL);
+    const arr = JSON.parse(saved) as string[];
+    const valid = arr.filter((e) =>
+      (ALL_EXCHANGES_WITH_MANUAL as readonly string[]).includes(e)
+    ) as FilterableExchange[];
+    return valid.length > 0 ? new Set(valid) : new Set(ALL_EXCHANGES_WITH_MANUAL);
+  } catch {
+    return new Set(ALL_EXCHANGES_WITH_MANUAL);
+  }
+}
+
+function loadGraphTab(): "balance" | "pnl" {
+  if (typeof window === "undefined") return "pnl";
+  try {
+    const saved = localStorage.getItem(GRAPH_TAB_STORAGE_KEY);
+    if (saved === "pnl" || saved === "balance") return saved;
+  } catch {}
+  return "pnl";
+}
+
 export default function DashboardPage() {
   const [summary, setSummary] = useState<MonthlySummary[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -89,6 +117,19 @@ export default function DashboardPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; current: string } | null>(null);
+
+  // Фильтр бирж — влияет только на PnL (итог, статистика месяца, последние сделки, график PnL).
+  // График «Спот vs Фьючерс» не зависит от этого фильтра (он использует отдельные данные баланса).
+  const [selectedExchanges, setSelectedExchanges] = useState<Set<FilterableExchange>>(new Set(ALL_EXCHANGES_WITH_MANUAL));
+
+  // Активный график на дашборде
+  const [graphTab, setGraphTab] = useState<"balance" | "pnl">("balance");
+
+  // Загружаем выбор из localStorage после монтирования (избегаем SSR mismatch)
+  useEffect(() => {
+    setSelectedExchanges(loadSelectedExchanges());
+    setGraphTab(loadGraphTab());
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -113,9 +154,37 @@ export default function DashboardPage() {
     load();
   }, [load]);
 
+  function toggleExchange(ex: FilterableExchange) {
+    setSelectedExchanges((prev) => {
+      const next = new Set(prev);
+      if (next.has(ex)) {
+        // Не даём снять последний — иначе останется пустой фильтр
+        if (next.size > 1) next.delete(ex);
+      } else {
+        next.add(ex);
+      }
+      try {
+        localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  }
+
+  function selectAllExchanges() {
+    setSelectedExchanges(new Set(ALL_EXCHANGES_WITH_MANUAL));
+    try {
+      localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(Array.from(ALL_EXCHANGES_WITH_MANUAL)));
+    } catch {}
+  }
+
+  function changeGraphTab(tab: "balance" | "pnl") {
+    setGraphTab(tab);
+    try {
+      localStorage.setItem(GRAPH_TAB_STORAGE_KEY, tab);
+    } catch {}
+  }
+
   // Синк ВСЕХ подключённых бирж последовательно.
-  // Для каждой — отдельный запрос к /api/sync/[exchange].
-  // Прогресс показываем юзеру, чтобы он понимал, что процесс идёт.
   async function syncAll() {
     setSyncing(true);
     setSyncMsg(null);
@@ -132,7 +201,6 @@ export default function DashboardPage() {
         const res = await fetch(`/api/sync/${ex}`);
         const data = await res.json();
         if (!res.ok || !data.ok) {
-          // Не падаем — идём к следующей бирже. Ошибку покажем в итоге.
           if (data.error && !data.error.includes("не подключён")) {
             errors.push(`${REGISTRY[ex].label}: ${data.error}`);
             failedCount++;
@@ -161,12 +229,25 @@ export default function DashboardPage() {
     await load();
   }
 
-  // Итог по всем сделкам — из monthly_summary (БД-агрегат, уважает RLS).
-  const totalNet = summary.reduce((acc, s) => acc + s.netPnl, 0);
+  // === ФИЛЬТРАЦИЯ СДЕЛОК ПО ВЫБРАННЫМ БИРЖАМ ===
+  // Влияет на: итог PnL, статистика месяца, последние сделки, график PnL по месяцам.
+  // НЕ влияет на: график «Спот vs Фьючерс» (он использует отдельные данные баланса).
+  const filteredTrades = trades.filter((t) => selectedExchanges.has(t.exchange as FilterableExchange));
+
+  // Итог PnL по выбранным биржам — считается из filteredTrades, а не из summary,
+  // потому что summary — это БД-агрегат по ВСЕМ биржам, без учёта фильтра.
+  const totalNet = filteredTrades.reduce(
+    (acc, t) => acc + (t.realized_pnl - t.fee + t.funding),
+    0
+  );
+
+  // Текущий месяц — самый свежий из summary (месяц остаётся тем же,
+  // фильтр меняет только состав сделок).
   const currentMonth = summary[0];
 
+  // Сделки текущего месяца с учётом фильтра бирж
   const currentMonthTrades = currentMonth
-    ? trades.filter((t) => t.closed_at.slice(0, 7) === currentMonth.month)
+    ? filteredTrades.filter((t) => t.closed_at.slice(0, 7) === currentMonth.month)
     : [];
 
   const currentMonthNetPnls = currentMonthTrades.map((t) => t.realized_pnl - t.fee + t.funding);
@@ -175,35 +256,52 @@ export default function DashboardPage() {
   const grossProfit = currentMonthNetPnls.filter((p) => p > 0).reduce((a, b) => a + b, 0);
   const grossLoss = currentMonthNetPnls.filter((p) => p <= 0).reduce((a, b) => a + b, 0);
 
-  const chartData = [...summary].reverse().map((s) => ({ month: s.month, netPnl: s.netPnl }));
+  // График PnL по месяцам — пересчитываем из filteredTrades (с учётом фильтра).
+  // Группируем по месяцу closed_at.
+  const chartData = (() => {
+    const byMonth = new Map<string, { netPnl: number; trades: number }>();
+    for (const t of filteredTrades) {
+      const month = t.closed_at.slice(0, 7);
+      const net = t.realized_pnl - t.fee + t.funding;
+      const existing = byMonth.get(month) ?? { netPnl: 0, trades: 0 };
+      existing.netPnl += net;
+      existing.trades += 1;
+      byMonth.set(month, existing);
+    }
+    return Array.from(byMonth.entries())
+      .map(([month, v]) => ({ month, netPnl: v.netPnl, trades: v.trades }))
+      .sort((a, b) => a.month.localeCompare(b.month));
+  })();
 
-  // Последние 5 сделок для блока на дашборде
-  const recentTrades = trades.slice(0, 5);
+  // Последние 5 сделок с учётом фильтра
+  const recentTrades = filteredTrades.slice(0, 5);
+
+  const isFilterActive = selectedExchanges.size < ALL_EXCHANGES_WITH_MANUAL.length;
 
   return (
     <div className="flex flex-col gap-6 max-w-6xl mx-auto">
       {/* Header: итог + синк */}
-      <div className="card-hero flex items-start justify-between flex-wrap gap-4 p-6">
+      <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
           <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-1">
-            Итог по всем сделкам
+            Итог по сделкам
           </div>
           {loading ? (
-            <div className="skeleton h-12 w-48" />
+            <div className="skeleton h-10 w-40" />
           ) : (
             <PnlValue value={totalNet} size="xl" />
           )}
-          <div className="text-xs text-[var(--color-text-faint)] mt-2">
-            {summary.length} {summary.length === 1 ? "месяц" : "месяцев"} в истории
+          <div className="text-xs text-[var(--color-text-faint)] mt-1">
+            {selectedExchanges.size === ALL_EXCHANGES_WITH_MANUAL.length
+              ? "Все биржи"
+              : `${selectedExchanges.size} из ${ALL_EXCHANGES_WITH_MANUAL.length} бирж`}
+            {" · "}
+            {filteredTrades.length} сделок
           </div>
         </div>
 
         <div className="flex flex-col items-end gap-2">
-          <button
-            onClick={syncAll}
-            disabled={syncing}
-            className="btn btn-primary"
-          >
+          <button onClick={syncAll} disabled={syncing} className="btn btn-primary">
             {syncing ? (
               <>
                 <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none">
@@ -235,6 +333,49 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Фильтр бирж — влияет только на PnL */}
+      <div className="card p-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mr-2">
+            Биржи в PnL:
+          </span>
+          {ALL_EXCHANGES_WITH_MANUAL.map((ex) => {
+            const checked = selectedExchanges.has(ex);
+            const label = ex === "manual" ? "Manual" : REGISTRY[ex as (typeof EXCHANGES)[number]]?.label ?? ex;
+            return (
+              <button
+                key={ex}
+                onClick={() => toggleExchange(ex)}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs border transition-colors ${
+                  checked
+                    ? "border-[var(--color-accent)] bg-[var(--color-surface)] text-[var(--color-text)]"
+                    : "border-[var(--color-border)] text-[var(--color-text-faint)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                <span
+                  className={`w-3 h-3 rounded-sm border flex items-center justify-center text-[10px] ${
+                    checked
+                      ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-white"
+                      : "border-[var(--color-border)]"
+                  }`}
+                >
+                  {checked ? "✓" : ""}
+                </span>
+                {label}
+              </button>
+            );
+          })}
+          {isFilterActive && (
+            <button
+              onClick={selectAllExchanges}
+              className="text-xs text-[var(--color-accent)] hover:underline ml-2"
+            >
+              Сбросить фильтр
+            </button>
+          )}
+        </div>
+      </div>
+
       {syncMsg && (
         <div className="text-sm text-[var(--color-text-muted)] font-mono-tabular">{syncMsg}</div>
       )}
@@ -244,6 +385,7 @@ export default function DashboardPage() {
         <div>
           <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-3">
             Статистика {currentMonth.month}
+            {isFilterActive && <span className="ml-2 text-[var(--color-accent)]">(отфильтровано)</span>}
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {loading ? (
@@ -259,7 +401,7 @@ export default function DashboardPage() {
               </>
             ) : (
               <>
-                <StatCard label="Сделок" value={String(currentMonth.tradeCount)} />
+                <StatCard label="Сделок" value={String(currentMonthTrades.length)} />
                 <StatCard
                   label="Приб / Убыт"
                   value={
@@ -270,18 +412,40 @@ export default function DashboardPage() {
                     </span>
                   }
                 />
-                <StatCard label="Win-rate" value={`${currentMonth.winRate}%`} />
-                <StatCard label="Итог месяца" value={<PnlValue value={currentMonth.netPnl} />} />
+                <StatCard
+                  label="Win-rate"
+                  value={`${
+                    currentMonthTrades.length > 0
+                      ? ((winCount / currentMonthTrades.length) * 100).toFixed(1)
+                      : "0"
+                  }%`}
+                />
+                <StatCard
+                  label="Итог месяца"
+                  value={
+                    <PnlValue
+                      value={currentMonthNetPnls.reduce((a, b) => a + b, 0)}
+                    />
+                  }
+                />
                 <StatCard label="Общая прибыль" value={<PnlValue value={grossProfit} />} />
                 <StatCard label="Общий убыток" value={<PnlValue value={grossLoss} />} />
-                <StatCard label="Комиссии" value={fmt(currentMonth.totalFee)} />
+                <StatCard
+                  label="Комиссии"
+                  value={fmt(currentMonthTrades.reduce((acc, t) => acc + t.fee, 0))}
+                />
                 <StatCard
                   label="Фандинг"
                   value={
-                    <span className={currentMonth.totalFunding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
-                      {currentMonth.totalFunding >= 0 ? "+" : ""}
-                      {fmt(currentMonth.totalFunding)}
-                    </span>
+                    (() => {
+                      const totalFunding = currentMonthTrades.reduce((acc, t) => acc + t.funding, 0);
+                      return (
+                        <span className={totalFunding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
+                          {totalFunding >= 0 ? "+" : ""}
+                          {fmt(totalFunding)}
+                        </span>
+                      );
+                    })()
                   }
                 />
               </>
@@ -290,38 +454,71 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* График баланса: спот vs фьючерс с целью */}
-      <BalanceChart />
-
-      {/* График PnL по месяцам */}
-      <div className="card p-5">
-        <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-4">
-          PnL по месяцам
+      {/* Табы графиков */}
+      <div className="card">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--color-border)]">
+          <div className="flex gap-1">
+            <button
+              onClick={() => changeGraphTab("balance")}
+              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                graphTab === "balance"
+                  ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              Спот vs Фьючерс
+            </button>
+            <button
+              onClick={() => changeGraphTab("pnl")}
+              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                graphTab === "pnl"
+                  ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              PnL по месяцам
+              {isFilterActive && (
+                <span className="ml-1 text-xs text-[var(--color-accent)]">●</span>
+              )}
+            </button>
+          </div>
         </div>
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={chartData}>
-            <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-            <XAxis dataKey="month" stroke="var(--color-text-faint)" fontSize={12} tickLine={false} axisLine={false} />
-            <YAxis stroke="var(--color-text-faint)" fontSize={12} tickLine={false} axisLine={false} />
-            <Tooltip
-              cursor={{ fill: "var(--color-surface-hover)" }}
-              contentStyle={{
-                background: "var(--chart-tooltip-bg)",
-                border: "1px solid var(--color-border)",
-                borderRadius: 8,
-                fontFamily: "var(--font-mono)",
-                color: "var(--color-text)",
-              }}
-              itemStyle={{ color: "var(--color-text)" }}
-              labelStyle={{ color: "var(--color-text-muted)", marginBottom: 4 }}
-            />
-            <Bar dataKey="netPnl" radius={[4, 4, 0, 0]}>
-              {chartData.map((d, i) => (
-                <Cell key={i} fill={d.netPnl >= 0 ? "var(--color-profit)" : "var(--color-loss)"} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+
+        {/* Содержимое активного графика */}
+        <div className="p-5">
+          {graphTab === "balance" ? (
+            <BalanceChart />
+          ) : (
+            <>
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={chartData}>
+                  <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+                  <XAxis dataKey="month" stroke="var(--color-text-faint)" fontSize={12} tickLine={false} axisLine={false} />
+                  <YAxis stroke="var(--color-text-faint)" fontSize={12} tickLine={false} axisLine={false} />
+                  <Tooltip
+                    cursor={{ fill: "var(--color-surface-hover)" }}
+                    contentStyle={{
+                      background: "var(--chart-tooltip-bg)",
+                      border: "1px solid var(--color-border)",
+                      borderRadius: 8,
+                      fontFamily: "var(--font-mono)",
+                      color: "var(--color-text)",
+                    }}
+                  />
+                  <Bar dataKey="netPnl" radius={[4, 4, 0, 0]}>
+                    {chartData.map((d, i) => (
+                      <Cell key={i} fill={d.netPnl >= 0 ? "var(--color-profit)" : "var(--color-loss)"} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+              <div className="text-xs text-[var(--color-text-faint)] mt-3">
+                {filteredTrades.length} сделок · {chartData.length} месяцев
+                {isFilterActive && " · фильтр активен"}
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Последние сделки */}
@@ -329,11 +526,9 @@ export default function DashboardPage() {
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
           <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
             Последние сделки
+            {isFilterActive && <span className="ml-2 text-[var(--color-accent)]">(отфильтровано)</span>}
           </div>
-          <Link
-            href="/trades"
-            className="text-xs text-[var(--color-accent)] hover:underline"
-          >
+          <Link href="/trades" className="text-xs text-[var(--color-accent)] hover:underline">
             Все сделки →
           </Link>
         </div>
@@ -345,7 +540,9 @@ export default function DashboardPage() {
           </div>
         ) : recentTrades.length === 0 ? (
           <div className="p-8 text-center text-sm text-[var(--color-text-faint)]">
-            Сделок пока нет — нажмите «Синк всё», чтобы подтянуть историю.
+            {filteredTrades.length === 0
+              ? "Нет сделок по выбранным биржам. Измените фильтр или синкните биржи."
+              : "Сделок пока нет — нажмите «Синк всё», чтобы подтянуть историю."}
           </div>
         ) : (
           <div className="divide-y divide-[var(--color-border)]">
