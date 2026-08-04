@@ -502,8 +502,10 @@ export default function DashboardPage() {
                       border: "1px solid var(--color-border)",
                       borderRadius: 8,
                       fontFamily: "var(--font-mono)",
-                      color: "var(--color-text)",
+                      color: "var(--chart-tooltip-text)",
                     }}
+                    labelStyle={{ color: "var(--chart-tooltip-text)" }}
+                    itemStyle={{ color: "var(--chart-tooltip-text)" }}
                   />
                   <Bar dataKey="netPnl" radius={[4, 4, 0, 0]}>
                     {chartData.map((d, i) => (
