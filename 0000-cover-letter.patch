@@ -1,0 +1,22 @@
+From 1dc5466ecdc6508299490cef680b826978a00cd3 Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Tue, 4 Aug 2026 09:49:42 +0000
+Subject: [PATCH 0/1] *** SUBJECT HERE ***
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+*** BLURB HERE ***
+
+futures-tracker-fixes (1):
+  fix: chart tooltip text color via CSS variable — readable in both
+    themes
+
+ app/globals.css             | 2 ++
+ app/page.tsx                | 4 +++-
+ components/BalanceChart.tsx | 4 +++-
+ 3 files changed, 8 insertions(+), 2 deletions(-)
+
+-- 
+2.47.3
+
