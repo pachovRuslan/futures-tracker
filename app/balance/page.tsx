@@ -102,9 +102,8 @@ export default function BalancePage() {
       <div>
         <h1 className="text-xl font-semibold mb-1">Баланс и цели</h1>
         <p className="text-sm text-[var(--color-text-muted)]">
-          Ручной учёт спот-баланса и фьючерсного депозита. График на дашборде строится из этих
-          точек. Спот — только ручной ввод. Фьючерс — по умолчанию считается из PnL, но можно
-          переопределить вручную на любую дату.
+          Ручной учёт спот-баланса и фьючерсного депозита. График на дашборде строится
+          из этих точек. Оба значения — только ручной ввод, раз в неделю или месяц.
         </p>
       </div>
 
@@ -222,7 +221,7 @@ export default function BalancePage() {
           loading={loading}
           onRemove={remove}
           accentColor="var(--color-accent)"
-          hint="Переопределяет авто-расчёт из PnL"
+          hint="Ручной ввод депозита"
         />
       </div>
 

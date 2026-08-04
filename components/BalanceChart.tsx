@@ -31,7 +31,6 @@ export default function BalanceChart() {
   const [loading, setLoading] = useState(true);
   const [editingGoal, setEditingGoal] = useState(false);
   const [goalInput, setGoalInput] = useState("");
-  const [startInput, setStartInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
 
   const load = useCallback(async () => {
@@ -40,7 +39,6 @@ export default function BalanceChart() {
     const json = await res.json();
     setData(json);
     setGoalInput(json.settings.goal_usd?.toString() ?? "");
-    setStartInput(json.settings.futures_start_usd?.toString() ?? "0");
     setLoading(false);
   }, []);
 
@@ -56,7 +54,6 @@ export default function BalanceChart() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           goal_usd: goalInput === "" ? null : Number(goalInput),
-          futures_start_usd: Number(startInput) || 0,
         }),
       });
       setEditingGoal(false);
@@ -140,20 +137,6 @@ export default function BalanceChart() {
               value={goalInput}
               onChange={(e) => setGoalInput(e.target.value)}
               placeholder="10000"
-              className="input font-mono-tabular"
-            />
-          </div>
-          <div className="flex flex-col gap-1.5 flex-1">
-            <label className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
-              Стартовый фьючерс, $
-            </label>
-            <input
-              type="number"
-              step="10"
-              min="0"
-              value={startInput}
-              onChange={(e) => setStartInput(e.target.value)}
-              placeholder="0"
               className="input font-mono-tabular"
             />
           </div>
@@ -306,7 +289,7 @@ export default function BalanceChart() {
 
       <div className="mt-3 flex items-center justify-between">
         <div className="text-xs text-[var(--color-text-faint)]">
-          Спот — только ручной ввод. Фьючерс — авто из PnL + ручные override.
+          Спот и фьючерс — только ручной ввод. Управление точками на странице «Баланс».
         </div>
         <Link
           href="/balance"

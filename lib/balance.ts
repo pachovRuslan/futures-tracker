@@ -1,23 +1,26 @@
 import { getSupabaseServerClient } from "@/lib/supabase";
-import type { BalanceChartPoint, UserSettings, Trade } from "@/lib/types";
+import type { BalanceChartPoint, UserSettings } from "@/lib/types";
 
 /**
  * Расчёт исторического баланса пользователя для графика.
  *
- * Алгоритм (Вариант C — гибрид):
+ * ВАЖНО: после отвязки от PnL сделок (август 2026) график стал чисто
+ * депозитным трекером — только ручной ввод. Никаких auto-данных из бирж.
  *
- * 1. Находим дату первой сделки — это старт графика.
+ * Алгоритм:
+ *
+ * 1. Находим старт графика — самая ранняя дата из (первая сделка, первый
+ *    снапшот). Если нет ни сделок, ни снапшотов — график пустой.
  * 2. Строим массив дат от старта до сегодня + 30 дней в будущее.
  * 3. Для каждой даты считаем:
- *    - SPOT: если есть ручной снапшот на эту дату — берём его. Иначе null
- *      (спот рисуется только там, где юзер ввёл данные; между точками —
- *      smooth curve от recharts интерполирует).
- *    - FUTURES: стартовая сумма + сумма PnL всех сделок до этой даты.
- *      Если есть ручной снапшот на эту дату — берём его (override).
+ *    - SPOT: forward-fill — берём последний ручной снапшот на или до этой
+ *      даты. До первой точки — null.
+ *    - FUTURES: forward-fill — так же, как спот. Больше НЕ считается из
+ *      PnL сделок. Только ручной ввод.
  * 4. SPREAD = |spot - futures| (если оба не null).
  *
- * В будущем можно добавить точку цели как последнюю точку графика —
- * но пока цель просто горизонтальная линия (ReferenceLine в recharts).
+ * futures_start_usd из user_settings больше НЕ используется для расчёта —
+ * поле оставлено в БД для совместимости, но игнорируется.
  *
  * ВАЖНО: функция принимает userId явно — service_role обходит RLS,
  * поэтому фильтр по user_id обязательный.
@@ -32,7 +35,7 @@ export async function getBalanceChartForUser(
 }> {
   const supabase = getSupabaseServerClient();
 
-  // 1. Настройки пользователя (цель, стартовый фьючерсный капитал)
+  // 1. Настройки пользователя (только goal_usd, futures_start_usd игнорируем)
   const { data: settingsRow } = await supabase
     .from("user_settings")
     .select("goal_usd, futures_start_usd")
@@ -44,41 +47,7 @@ export async function getBalanceChartForUser(
     futures_start_usd: settingsRow?.futures_start_usd ?? 0,
   };
 
-  // 2. Дата первой сделки — старт графика
-  const { data: firstTrade } = await supabase
-    .from("trades")
-    .select("closed_at")
-    .eq("user_id", userId)
-    .order("closed_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!firstTrade) {
-    // Сделок нет — график пустой
-    return {
-      points: [],
-      settings,
-      startDate: null,
-      endDate: new Date().toISOString().slice(0, 10),
-    };
-  }
-
-  const startDate = new Date(firstTrade.closed_at);
-  const startDateStr = startDate.toISOString().slice(0, 10);
-
-  // Конец графика — сегодня + 30 дней в будущее (для визуального запаса)
-  const endDate = new Date();
-  endDate.setDate(endDate.getDate() + 30);
-  const endDateStr = endDate.toISOString().slice(0, 10);
-
-  // 3. Все сделки пользователя (PnL)
-  const { data: trades } = await supabase
-    .from("trades")
-    .select("closed_at, realized_pnl, fee, funding")
-    .eq("user_id", userId)
-    .order("closed_at", { ascending: true });
-
-  // 4. Все ручные снапшоты (spot + futures)
+  // 2. Все ручные снапшоты (spot + futures)
   const { data: snapshots } = await supabase
     .from("balance_snapshots")
     .select("id, type, value_usd, snapshot_date, note, created_at")
@@ -88,38 +57,63 @@ export async function getBalanceChartForUser(
   const spotSnapshots = (snapshots ?? []).filter((s) => s.type === "spot");
   const futuresSnapshots = (snapshots ?? []).filter((s) => s.type === "futures");
 
-  // 5. Строим массив дат с дневным шагом.
+  // 3. Старт графика — самая ранняя дата из (первая сделка, первый снапшот).
+  //    Сделки всё ещё нужны для определения периода (если пользователь торгует,
+  //    но ещё не ввёл снапшоты — показать пустой график за период торговли).
+  const { data: firstTrade } = await supabase
+    .from("trades")
+    .select("closed_at")
+    .eq("user_id", userId)
+    .order("closed_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  const firstSnapshotDate = snapshots && snapshots.length > 0
+    ? snapshots[0].snapshot_date
+    : null;
+  const firstTradeDate = firstTrade ? firstTrade.closed_at.slice(0, 10) : null;
+
+  // Берём минимум из доступных дат
+  const startDateCandidates = [firstTradeDate, firstSnapshotDate].filter(
+    (d): d is string => d !== null
+  );
+
+  if (startDateCandidates.length === 0) {
+    // Нет ни сделок, ни снапшотов — график пустой
+    return {
+      points: [],
+      settings,
+      startDate: null,
+      endDate: new Date().toISOString().slice(0, 10),
+    };
+  }
+
+  const startDateStr = startDateCandidates.sort()[0];
+  const startDate = new Date(startDateStr);
+
+  // Конец графика — сегодня + 30 дней в будущее (для визуального запаса)
+  const endDate = new Date();
+  endDate.setDate(endDate.getDate() + 30);
+  const endDateStr = endDate.toISOString().slice(0, 10);
+
+  // 4. Строим массив дат с дневным шагом.
   //    Если период > 365 дней — агрегируем по неделям, чтобы не тянуть 5+ лет точек.
   const totalDays = Math.ceil((endDate.getTime() - startDate.getTime()) / (24 * 60 * 60 * 1000));
   const stepDays = totalDays > 365 ? 7 : 1;
 
   const points: BalanceChartPoint[] = [];
-  let cumulativePnl = 0;
-  let tradeIdx = 0;
-  const typedTrades: Trade[] = (trades ?? []) as unknown as Trade[];
 
-  // Forward-fill для spot: если ввели $1000 14 июля, то 15-16-17 июля
-  // спот остаётся $1000 (пока не введёте новое значение). Без этого линия
-  // spot рисуется только в точках ввода (нужно 2+ точки), а spread
-  // считается только там, где spot не null — получается одна точка.
+  // Forward-fill для spot и futures: если ввели $1000 14 июля, то 15-16-17 июля
+  // значение остаётся $1000 (пока не введёте новое). Без этого линии
+  // рисуются только в точках ввода (нужно 2+ точки), а spread
+  // считается только там, где оба значения не null — получается одна точка.
   let lastSpot: { value: number; date: string } | null = null;
+  let lastFutures: { value: number; date: string } | null = null;
 
   for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + stepDays)) {
     const dateStr = d.toISOString().slice(0, 10);
 
-    // Накапливаем PnL сделок до этой даты
-    while (
-      tradeIdx < typedTrades.length &&
-      typedTrades[tradeIdx].closed_at.slice(0, 10) <= dateStr
-    ) {
-      const t = typedTrades[tradeIdx];
-      cumulativePnl += t.realized_pnl - t.fee + t.funding;
-      tradeIdx++;
-    }
-
     // SPOT — forward-fill: берём последний снапшот на или до этой даты.
-    // Если есть новый снапшот на эту дату — обновляем lastSpot.
-    // Если снапшотов ещё не было вообще — spot = null (не рисуем до первой точки).
     const spotSnap = spotSnapshots.find((s) => s.snapshot_date === dateStr);
     if (spotSnap) {
       lastSpot = { value: Number(spotSnap.value_usd), date: dateStr };
@@ -127,18 +121,21 @@ export async function getBalanceChartForUser(
       // Защита: если мы каким-то образом оказались раньше первой точки — сбрасываем
       lastSpot = null;
     }
-
     const spot = lastSpot ? lastSpot.value : null;
     const isManualSpot = !!spotSnap;
 
-    // FUTURES — auto (старт + PnL), но ручной снапшот переопределяет
+    // FUTURES — forward-fill, так же как spot. Больше НЕ считается из PnL.
     const futuresSnap = futuresSnapshots.find((s) => s.snapshot_date === dateStr);
-    const futures = futuresSnap
-      ? Number(futuresSnap.value_usd)
-      : settings.futures_start_usd + cumulativePnl;
+    if (futuresSnap) {
+      lastFutures = { value: Number(futuresSnap.value_usd), date: dateStr };
+    } else if (lastFutures && lastFutures.date > dateStr) {
+      lastFutures = null;
+    }
+    const futures = lastFutures ? lastFutures.value : null;
+    const isManualFutures = !!futuresSnap;
 
-    // SPREAD = |spot - futures| (только если spot известен)
-    const spread = spot !== null ? Math.abs(spot - futures) : null;
+    // SPREAD = |spot - futures| (только если оба известны)
+    const spread = spot !== null && futures !== null ? Math.abs(spot - futures) : null;
 
     points.push({
       date: dateStr,
@@ -146,7 +143,7 @@ export async function getBalanceChartForUser(
       futures,
       spread,
       is_manual_spot: isManualSpot,
-      is_manual_futures: !!futuresSnap,
+      is_manual_futures: isManualFutures,
     });
   }
 
