@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 interface AllowlistEntry {
   email: string;
@@ -48,6 +50,7 @@ function fmtPnl(n: number): string {
 }
 
 export default function AdminPage() {
+  const router = useRouter();
   const [tab, setTab] = useState<"allowlist" | "users">("allowlist");
   const [allowlist, setAllowlist] = useState<AllowlistEntry[]>([]);
   const [users, setUsers] = useState<UserOverview[]>([]);
@@ -316,9 +319,12 @@ export default function AdminPage() {
                 {users.map((u) => (
                   <tr
                     key={u.user_id}
-                    className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-hover)] transition-colors"
+                    onClick={() => router.push(`/admin/users/${u.user_id}`)}
+                    className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-hover)] transition-colors cursor-pointer"
                   >
-                    <td className="px-4 py-2.5 font-mono-tabular text-xs">{u.email}</td>
+                    <td className="px-4 py-2.5 font-mono-tabular text-xs">
+                      <span className="text-[var(--color-accent)]">{u.email}</span>
+                    </td>
                     <td className="px-4 py-2.5 text-xs text-[var(--color-text-faint)] whitespace-nowrap">
                       {fmtDate(u.registered_at)}
                     </td>
@@ -363,6 +369,9 @@ export default function AdminPage() {
               </tbody>
             </table>
           )}
+          <div className="px-4 py-3 border-t border-[var(--color-border)] text-xs text-[var(--color-text-faint)]">
+            💡 Кликните по строке, чтобы увидеть детальную статистику пользователя
+          </div>
         </div>
       )}
     </div>
