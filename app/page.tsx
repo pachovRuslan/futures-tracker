@@ -132,6 +132,15 @@ export default function DashboardPage() {
       ? ((winCount / activeMonthTrades.length) * 100).toFixed(1)
       : "0";
 
+  // Win-rate за всё время — по всем отфильтрованным сделкам (а не только за месяц).
+  // Считаем сделки с net PnL > 0 как прибыльные, <= 0 как убыточные.
+  const allTimeNetPnls = filteredTrades.map((t) => t.realized_pnl - t.fee + t.funding);
+  const allTimeWinCount = allTimeNetPnls.filter((p) => p > 0).length;
+  const totalWinRate =
+    allTimeNetPnls.length > 0
+      ? ((allTimeWinCount / allTimeNetPnls.length) * 100).toFixed(1)
+      : "0";
+
   // Последние 5 сделок с учётом фильтра
   const recentTrades = filteredTrades.slice(0, 5);
 
@@ -180,6 +189,7 @@ export default function DashboardPage() {
           grossLoss={grossLoss}
           fee={activeMonthFee}
           funding={activeMonthFunding}
+          totalWinRate={totalWinRate}
           isSelected={!!selectedMonth}
           isFilterActive={isFilterActive}
           onResetMonth={resetMonth}

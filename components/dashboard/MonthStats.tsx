@@ -11,6 +11,7 @@ interface MonthStatsProps {
   grossLoss: number;
   fee: number;
   funding: number;
+  totalWinRate: string; // win-rate за всё время (по всем сделкам)
   isSelected: boolean; // месяц выбран кликом, не текущий
   isFilterActive: boolean; // активен фильтр бирж
   onResetMonth?: () => void;
@@ -58,9 +59,20 @@ function SkeletonCard() {
 }
 
 /**
- * Блок статистики выбранного месяца — 8 карточек.
+ * Блок статистики выбранного месяца — 9 карточек в сетке 3×3.
  * Заголовок показывает: Статистика {month} (выбран|текущий) (отфильтровано).
  * Кнопка «Сбросить месяц» — только если месяц выбран кликом.
+ *
+ * 9 карточек:
+ * 1. Сделок (за месяц)
+ * 2. Приб / Убыт (за месяц)
+ * 3. Win-rate (за месяц)
+ * 4. Итог месяца
+ * 5. Общая прибыль
+ * 6. Общий убыток
+ * 7. Комиссии
+ * 8. Фандинг
+ * 9. Win-rate за всё время
  */
 export default function MonthStats({
   month,
@@ -73,6 +85,7 @@ export default function MonthStats({
   grossLoss,
   fee,
   funding,
+  totalWinRate,
   isSelected,
   isFilterActive,
   onResetMonth,
@@ -100,10 +113,11 @@ export default function MonthStats({
           </button>
         )}
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         {tradesCount === 0 && netPnl === 0 ? (
           // Скелетоны при загрузке (loading=true передаётся через 0/0)
           <>
+            <SkeletonCard />
             <SkeletonCard />
             <SkeletonCard />
             <SkeletonCard />
@@ -145,6 +159,10 @@ export default function MonthStats({
                   {fmt(funding)}
                 </span>
               }
+            />
+            <StatCard
+              label="Win-rate за всё время"
+              value={`${totalWinRate}%`}
             />
           </>
         )}
