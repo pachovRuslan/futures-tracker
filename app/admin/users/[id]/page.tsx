@@ -3,17 +3,10 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-  Cell,
-} from "recharts";
 import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+import { useSelectedMonth } from "@/components/dashboard/useSelectedMonth";
+import UserPnLChart from "@/components/admin/UserPnLChart";
+import UserMonthStats from "@/components/admin/UserMonthStats";
 
 interface Profile {
   email: string;
@@ -42,6 +35,16 @@ interface Trade {
   closed_at: string;
 }
 
+interface MonthlyItem {
+  month: string;
+  total_pnl: number;
+  total_fee: number;
+  total_funding: number;
+  net_pnl: number;
+  trade_count: number;
+  win_rate: number;
+}
+
 interface TradesStats {
   total_trades: number;
   total_net_pnl: number;
@@ -55,23 +58,17 @@ interface TradesStats {
   total_funding: number;
 }
 
-interface MonthlyItem {
+interface MonthlyDetail {
   month: string;
-  total_pnl: number;
-  total_fee: number;
-  total_funding: number;
-  net_pnl: number;
-  trade_count: number;
-  win_rate: number;
-}
-
-function fmt(n: number): string {
-  return n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
-}
-
-function fmtUsd(n: number): string {
-  const sign = n >= 0 ? "+" : "";
-  return sign + n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  trades: Trade[];
+  netPnl: number;
+  winCount: number;
+  lossCount: number;
+  grossProfit: number;
+  grossLoss: number;
+  fee: number;
+  funding: number;
+  winRate: string;
 }
 
 function fmtDate(iso: string | null): string {
@@ -83,11 +80,6 @@ function fmtDate(iso: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function fmtFee(fee: number, exchange: string): string {
-  if (exchange === "bybit" && fee === 0) return "—";
-  return fee.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
 }
 
 function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
@@ -114,6 +106,9 @@ export default function AdminUserDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Хук выбранного месяца (переиспользуем из дашборда)
+  const { selectedMonth, selectMonth, resetMonth } = useSelectedMonth();
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -137,10 +132,60 @@ export default function AdminUserDetailPage() {
     load();
   }, [load]);
 
-  const chartData = [...monthly].reverse().map((m) => ({
-    month: m.month,
-    netPnl: Number(m.net_pnl),
-  }));
+  // График: monthly данные → формат для UserPnLChart (sorted asc)
+  const chartData = [...monthly]
+    .reverse()
+    .map((m) => ({ month: m.month, netPnl: Number(m.net_pnl) }));
+
+  // Сделки по месяцам — для расчёта детальной статистики выбранного месяца
+  // Группируем recentTrades по месяцу (первые 20 сделок — НЕ все, но для
+  // отображения статистики месяца их достаточно, если месяц свежий).
+  // TODO: для старых месяцев нужен отдельный API-запрос. Пока используем
+  // monthlySummary + stats для общих агрегатов, а recentTrades — для деталей.
+  const monthlyDetails = (): MonthlyDetail[] => {
+    // Считаем детальные статистики из monthlySummary (это БД-агрегаты,
+    // точные для всех месяцев, не только для recentTrades).
+    return monthly.map((m) => {
+      // Приб/Уыт — из win_rate и trade_count
+      const total = Number(m.trade_count);
+      const winRatePct = Number(m.win_rate ?? 0);
+      const winCount = Math.round((winRatePct / 100) * total);
+      const lossCount = total - winCount;
+      const netPnl = Number(m.net_pnl);
+      // grossProfit + grossLoss = netPnl, grossProfit >= 0, grossLoss <= 0.
+      // Не знаем точное разбиение без сделок — используем приближение:
+      // grossProfit = sum positive, grossLoss = sum negative.
+      // Из monthlySummary у нас только total_pnl (realized_pnl without fee/funding)
+      // и net_pnl.grossProfit/grossLoss не доступны без сырых сделок.
+      // Для UI показываем netPnl как «Итог месяца», а grossProfit/grossLoss
+      // оставляем 0 (показываются как «—» если 0, что лучше, чем неточные числа).
+      return {
+        month: m.month,
+        trades: [], // не загружаем все сделки для каждого месяца
+        netPnl,
+        winCount,
+        lossCount,
+        grossProfit: 0,
+        grossLoss: 0,
+        fee: Number(m.total_fee),
+        funding: Number(m.total_funding),
+        winRate: winRatePct.toFixed(1),
+      };
+    });
+  };
+
+  const allMonthlyDetails = monthlyDetails();
+
+  // Активный месяц — выбранный или самый свежий
+  const activeMonth =
+    selectedMonth ??
+    allMonthlyDetails[0]?.month ??
+    chartData[chartData.length - 1]?.month ??
+    null;
+
+  // Статистика активного месяца
+  const activeMonthDetail =
+    allMonthlyDetails.find((m) => m.month === activeMonth) ?? null;
 
   const winRate = stats && stats.total_trades > 0
     ? ((stats.profitable / stats.total_trades) * 100).toFixed(1)
@@ -150,10 +195,7 @@ export default function AdminUserDetailPage() {
     <div className="max-w-6xl mx-auto flex flex-col gap-6">
       {/* Шапка с кнопкой "назад" */}
       <div className="flex items-center gap-4 flex-wrap">
-        <button
-          onClick={() => router.push("/admin")}
-          className="btn text-xs py-1.5"
-        >
+        <button onClick={() => router.push("/admin")} className="btn text-xs py-1.5">
           ← Назад к списку
         </button>
         {profile && (
@@ -179,12 +221,9 @@ export default function AdminUserDetailPage() {
         </div>
       ) : profile ? (
         <>
-          {/* Карточки статистики */}
+          {/* Карточки общей статистики */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <StatCard
-              label="Всего сделок"
-              value={stats?.total_trades ?? 0}
-            />
+            <StatCard label="Всего сделок" value={stats?.total_trades ?? 0} />
             <StatCard
               label="Приб / Убыт"
               value={
@@ -200,16 +239,21 @@ export default function AdminUserDetailPage() {
               label="Итог PnL"
               value={
                 <span className={(stats?.total_net_pnl ?? 0) >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
-                  {fmtUsd(stats?.total_net_pnl ?? 0)}
+                  {(stats?.total_net_pnl ?? 0) >= 0 ? "+" : ""}
+                  {(stats?.total_net_pnl ?? 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 })}
                 </span>
               }
             />
-            <StatCard label="Комиссии" value={fmt(stats?.total_fee ?? 0)} />
+            <StatCard
+              label="Комиссии"
+              value={(stats?.total_fee ?? 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 })}
+            />
             <StatCard
               label="Фандинг"
               value={
                 <span className={(stats?.total_funding ?? 0) >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
-                  {fmtUsd(stats?.total_funding ?? 0)}
+                  {(stats?.total_funding ?? 0) >= 0 ? "+" : ""}
+                  {(stats?.total_funding ?? 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 })}
                 </span>
               }
             />
@@ -242,21 +286,14 @@ export default function AdminUserDetailPage() {
           {/* Подключения бирж */}
           <div className="card">
             <div className="px-5 py-4 border-b border-[var(--color-border)]">
-              <span className="text-sm font-medium">
-                Подключения ({connections.length})
-              </span>
+              <span className="text-sm font-medium">Подключения ({connections.length})</span>
             </div>
             {connections.length === 0 ? (
-              <div className="p-5 text-sm text-[var(--color-text-faint)]">
-                Биржи не подключены
-              </div>
+              <div className="p-5 text-sm text-[var(--color-text-faint)]">Биржи не подключены</div>
             ) : (
               <div className="divide-y divide-[var(--color-border)]">
                 {connections.map((c) => (
-                  <div
-                    key={c.exchange}
-                    className="flex items-center justify-between px-5 py-3"
-                  >
+                  <div key={c.exchange} className="flex items-center justify-between px-5 py-3">
                     <div className="flex items-center gap-3">
                       <span className="text-sm">
                         {c.exchange === "manual"
@@ -267,9 +304,7 @@ export default function AdminUserDetailPage() {
                         {c.key_preview}
                       </span>
                     </div>
-                    <span className="text-xs text-[var(--color-text-faint)]">
-                      {fmtDate(c.created_at)}
-                    </span>
+                    <span className="text-xs text-[var(--color-text-faint)]">{fmtDate(c.created_at)}</span>
                   </div>
                 ))}
               </div>
@@ -284,28 +319,22 @@ export default function AdminUserDetailPage() {
               </div>
               <div className="divide-y divide-[var(--color-border)]">
                 {Object.entries(stats.by_exchange).map(([ex, data]) => (
-                  <div
-                    key={ex}
-                    className="flex items-center justify-between px-5 py-3"
-                  >
+                  <div key={ex} className="flex items-center justify-between px-5 py-3">
                     <div className="flex items-center gap-3">
                       <span className="text-sm">
                         {ex === "manual"
                           ? "manual"
                           : REGISTRY[ex as (typeof EXCHANGES)[number]]?.label ?? ex}
                       </span>
-                      <span className="text-xs text-[var(--color-text-faint)]">
-                        {data.count} сделок
-                      </span>
+                      <span className="text-xs text-[var(--color-text-faint)]">{data.count} сделок</span>
                     </div>
                     <span
                       className={`font-mono-tabular text-sm ${
-                        data.pnl >= 0
-                          ? "text-[var(--color-profit)]"
-                          : "text-[var(--color-loss)]"
+                        Number(data.pnl) >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
                       }`}
                     >
-                      {fmtUsd(Number(data.pnl))}
+                      {Number(data.pnl) >= 0 ? "+" : ""}
+                      {Number(data.pnl).toLocaleString("ru-RU", { maximumFractionDigits: 2 })}
                     </span>
                   </div>
                 ))}
@@ -313,64 +342,45 @@ export default function AdminUserDetailPage() {
             </div>
           )}
 
-          {/* График PnL по месяцам */}
+          {/* График PnL по месяцам (кликабельный) */}
           {chartData.length > 0 && (
             <div className="card p-5">
               <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-4">
                 PnL по месяцам
               </div>
-              <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={chartData}>
-                  <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-                  <XAxis
-                    dataKey="month"
-                    stroke="var(--color-text-faint)"
-                    fontSize={12}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis
-                    stroke="var(--color-text-faint)"
-                    fontSize={12}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <Tooltip
-                    cursor={{ fill: "var(--color-surface-hover)" }}
-                    contentStyle={{
-                      background: "#1a1f2e",
-                      border: "1px solid #2a3142",
-                      borderRadius: 8,
-                      fontFamily: "var(--font-mono)",
-                      color: "#ffffff",
-                    }}
-                    labelStyle={{ color: "#8b95a5" }}
-                    itemStyle={{ color: "#ffffff" }}
-                  />
-                  <Bar dataKey="netPnl" radius={[4, 4, 0, 0]}>
-                    {chartData.map((d, i) => (
-                      <Cell
-                        key={i}
-                        fill={d.netPnl >= 0 ? "var(--color-profit)" : "var(--color-loss)"}
-                      />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <UserPnLChart
+                data={chartData}
+                activeMonth={activeMonth}
+                onSelectMonth={selectMonth}
+              />
             </div>
+          )}
+
+          {/* Статистика выбранного месяца (кликабельная) */}
+          {activeMonthDetail && (
+            <UserMonthStats
+              month={activeMonthDetail.month}
+              tradesCount={Number(monthly.find((m) => m.month === activeMonth)?.trade_count ?? 0)}
+              winCount={activeMonthDetail.winCount}
+              lossCount={activeMonthDetail.lossCount}
+              winRate={activeMonthDetail.winRate}
+              netPnl={activeMonthDetail.netPnl}
+              grossProfit={activeMonthDetail.grossProfit}
+              grossLoss={activeMonthDetail.grossLoss}
+              fee={activeMonthDetail.fee}
+              funding={activeMonthDetail.funding}
+              isSelected={!!selectedMonth}
+              onResetMonth={resetMonth}
+            />
           )}
 
           {/* Последние сделки */}
           <div className="card">
             <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
-              <span className="text-sm font-medium">
-                Последние сделки ({recentTrades.length})
-              </span>
+              <span className="text-sm font-medium">Последние сделки ({recentTrades.length})</span>
             </div>
             {recentTrades.length === 0 ? (
-              <div className="p-5 text-sm text-[var(--color-text-faint)]">
-                Сделок нет
-              </div>
+              <div className="p-5 text-sm text-[var(--color-text-faint)]">Сделок нет</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -388,10 +398,7 @@ export default function AdminUserDetailPage() {
                       const net = t.realized_pnl - t.fee + t.funding;
                       const positive = net >= 0;
                       return (
-                        <tr
-                          key={t.id}
-                          className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
-                        >
+                        <tr key={t.id} className="border-t border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]">
                           <td className="px-4 py-2.5 text-xs text-[var(--color-text-muted)] whitespace-nowrap font-mono-tabular">
                             {fmtDate(t.closed_at)}
                           </td>
@@ -402,22 +409,13 @@ export default function AdminUserDetailPage() {
                           </td>
                           <td className="px-4 py-2.5 font-mono-tabular text-xs">{t.symbol}</td>
                           <td className="px-4 py-2.5">
-                            <span
-                              className={
-                                t.side === "long"
-                                  ? "text-[var(--color-profit)] text-xs"
-                                  : "text-[var(--color-loss)] text-xs"
-                              }
-                            >
+                            <span className={t.side === "long" ? "text-[var(--color-profit)] text-xs" : "text-[var(--color-loss)] text-xs"}>
                               {t.side === "long" ? "Long" : "Short"}
                             </span>
                           </td>
-                          <td
-                            className={`px-4 py-2.5 text-right font-mono-tabular text-xs ${
-                              positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
-                            }`}
-                          >
-                            {fmtUsd(net)}
+                          <td className={`px-4 py-2.5 text-right font-mono-tabular text-xs ${positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}`}>
+                            {positive ? "+" : ""}
+                            {net.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}
                           </td>
                         </tr>
                       );
@@ -428,15 +426,12 @@ export default function AdminUserDetailPage() {
             )}
           </div>
 
-          {/* Управление пользователем */}
+          {/* User ID */}
           <div className="card p-4 flex items-center justify-between gap-3 flex-wrap">
             <div className="text-xs text-[var(--color-text-faint)]">
               User ID: <code className="font-mono-tabular">{userId}</code>
             </div>
-            <Link
-              href="/admin"
-              className="text-xs text-[var(--color-accent)] hover:underline"
-            >
+            <Link href="/admin" className="text-xs text-[var(--color-accent)] hover:underline">
               ← Все пользователи
             </Link>
           </div>
