@@ -21,6 +21,7 @@ type FilterableExchange = (typeof ALL_EXCHANGES_WITH_MANUAL)[number];
 
 const FILTER_STORAGE_KEY = "futures-tracker-exchange-filter";
 const GRAPH_TAB_STORAGE_KEY = "futures-tracker-graph-tab";
+const SELECTED_MONTH_STORAGE_KEY = "futures-tracker-selected-month";
 
 function fmt(n: number): string {
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -102,12 +103,21 @@ function loadSelectedExchanges(): Set<FilterableExchange> {
 }
 
 function loadGraphTab(): "balance" | "pnl" {
-  if (typeof window === "undefined") return "pnl";
+  if (typeof window === "undefined") return "balance";
   try {
     const saved = localStorage.getItem(GRAPH_TAB_STORAGE_KEY);
     if (saved === "pnl" || saved === "balance") return saved;
   } catch {}
-  return "pnl";
+  return "balance";
+}
+
+function loadSelectedMonth(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const saved = localStorage.getItem(SELECTED_MONTH_STORAGE_KEY);
+    if (saved && saved.length === 7) return saved; // YYYY-MM
+  } catch {}
+  return null;
 }
 
 export default function DashboardPage() {
@@ -125,10 +135,16 @@ export default function DashboardPage() {
   // Активный график на дашборде
   const [graphTab, setGraphTab] = useState<"balance" | "pnl">("balance");
 
+  // Выбранный месяц в графике PnL (клик по столбцу).
+  // null = самый свежий месяц (текущий). При клике на столбец —
+  // статистика сверху и win-rate пересчитываются для выбранного месяца.
+  const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
+
   // Загружаем выбор из localStorage после монтирования (избегаем SSR mismatch)
   useEffect(() => {
     setSelectedExchanges(loadSelectedExchanges());
     setGraphTab(loadGraphTab());
+    setSelectedMonth(loadSelectedMonth());
   }, []);
 
   const load = useCallback(async () => {
@@ -181,6 +197,20 @@ export default function DashboardPage() {
     setGraphTab(tab);
     try {
       localStorage.setItem(GRAPH_TAB_STORAGE_KEY, tab);
+    } catch {}
+  }
+
+  function selectMonth(month: string) {
+    setSelectedMonth(month);
+    try {
+      localStorage.setItem(SELECTED_MONTH_STORAGE_KEY, month);
+    } catch {}
+  }
+
+  function resetMonth() {
+    setSelectedMonth(null);
+    try {
+      localStorage.removeItem(SELECTED_MONTH_STORAGE_KEY);
     } catch {}
   }
 
@@ -241,22 +271,8 @@ export default function DashboardPage() {
     0
   );
 
-  // Текущий месяц — самый свежий из summary (месяц остаётся тем же,
-  // фильтр меняет только состав сделок).
-  const currentMonth = summary[0];
-
-  // Сделки текущего месяца с учётом фильтра бирж
-  const currentMonthTrades = currentMonth
-    ? filteredTrades.filter((t) => t.closed_at.slice(0, 7) === currentMonth.month)
-    : [];
-
-  const currentMonthNetPnls = currentMonthTrades.map((t) => t.realized_pnl - t.fee + t.funding);
-  const winCount = currentMonthNetPnls.filter((p) => p > 0).length;
-  const lossCount = currentMonthNetPnls.filter((p) => p <= 0).length;
-  const grossProfit = currentMonthNetPnls.filter((p) => p > 0).reduce((a, b) => a + b, 0);
-  const grossLoss = currentMonthNetPnls.filter((p) => p <= 0).reduce((a, b) => a + b, 0);
-
-  // График PnL по месяцам — пересчитываем из filteredTrades (с учётом фильтра).
+  // === ГРАФИК PnL ПО МЕСЯЦАМ ===
+  // Пересчитываем из filteredTrades (с учётом фильтра бирж).
   // Группируем по месяцу closed_at.
   const chartData = (() => {
     const byMonth = new Map<string, { netPnl: number; trades: number }>();
@@ -272,6 +288,29 @@ export default function DashboardPage() {
       .map(([month, v]) => ({ month, netPnl: v.netPnl, trades: v.trades }))
       .sort((a, b) => a.month.localeCompare(b.month));
   })();
+
+  // === ВЫБРАННЫЙ МЕСЯЦ ===
+  // null = самый свежий месяц (по умолчанию).
+  // При клике на столбец графика — статистика пересчитывается для выбранного месяца.
+  const activeMonth = selectedMonth ?? chartData[chartData.length - 1]?.month ?? null;
+
+  // Сделки активного месяца с учётом фильтра бирж
+  const activeMonthTrades = activeMonth
+    ? filteredTrades.filter((t) => t.closed_at.slice(0, 7) === activeMonth)
+    : [];
+
+  const activeMonthNetPnls = activeMonthTrades.map((t) => t.realized_pnl - t.fee + t.funding);
+  const winCount = activeMonthNetPnls.filter((p) => p > 0).length;
+  const lossCount = activeMonthNetPnls.filter((p) => p <= 0).length;
+  const grossProfit = activeMonthNetPnls.filter((p) => p > 0).reduce((a, b) => a + b, 0);
+  const grossLoss = activeMonthNetPnls.filter((p) => p <= 0).reduce((a, b) => a + b, 0);
+  const activeMonthNetPnl = activeMonthNetPnls.reduce((a, b) => a + b, 0);
+  const activeMonthFee = activeMonthTrades.reduce((acc, t) => acc + t.fee, 0);
+  const activeMonthFunding = activeMonthTrades.reduce((acc, t) => acc + t.funding, 0);
+  const activeMonthWinRate =
+    activeMonthTrades.length > 0
+      ? ((winCount / activeMonthTrades.length) * 100).toFixed(1)
+      : "0";
 
   // Последние 5 сделок с учётом фильтра
   const recentTrades = filteredTrades.slice(0, 5);
@@ -380,12 +419,28 @@ export default function DashboardPage() {
         <div className="text-sm text-[var(--color-text-muted)] font-mono-tabular">{syncMsg}</div>
       )}
 
-      {/* Статистика текущего месяца */}
-      {currentMonth && (
+      {/* Статистика выбранного месяца */}
+      {activeMonth && (
         <div>
-          <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-3">
-            Статистика {currentMonth.month}
-            {isFilterActive && <span className="ml-2 text-[var(--color-accent)]">(отфильтровано)</span>}
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)]">
+              Статистика {activeMonth}
+              {selectedMonth && (
+                <span className="ml-2 text-[var(--color-accent)]">(выбран)</span>
+              )}
+              {!selectedMonth && (
+                <span className="ml-2 text-[var(--color-text-faint)]">(текущий)</span>
+              )}
+              {isFilterActive && <span className="ml-2 text-[var(--color-accent)]">(отфильтровано)</span>}
+            </div>
+            {selectedMonth && (
+              <button
+                onClick={resetMonth}
+                className="text-xs text-[var(--color-accent)] hover:underline"
+              >
+                Сбросить месяц
+              </button>
+            )}
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {loading ? (
@@ -401,7 +456,7 @@ export default function DashboardPage() {
               </>
             ) : (
               <>
-                <StatCard label="Сделок" value={String(currentMonthTrades.length)} />
+                <StatCard label="Сделок" value={String(activeMonthTrades.length)} />
                 <StatCard
                   label="Приб / Убыт"
                   value={
@@ -412,40 +467,18 @@ export default function DashboardPage() {
                     </span>
                   }
                 />
-                <StatCard
-                  label="Win-rate"
-                  value={`${
-                    currentMonthTrades.length > 0
-                      ? ((winCount / currentMonthTrades.length) * 100).toFixed(1)
-                      : "0"
-                  }%`}
-                />
-                <StatCard
-                  label="Итог месяца"
-                  value={
-                    <PnlValue
-                      value={currentMonthNetPnls.reduce((a, b) => a + b, 0)}
-                    />
-                  }
-                />
+                <StatCard label="Win-rate" value={`${activeMonthWinRate}%`} />
+                <StatCard label="Итог месяца" value={<PnlValue value={activeMonthNetPnl} />} />
                 <StatCard label="Общая прибыль" value={<PnlValue value={grossProfit} />} />
                 <StatCard label="Общий убыток" value={<PnlValue value={grossLoss} />} />
-                <StatCard
-                  label="Комиссии"
-                  value={fmt(currentMonthTrades.reduce((acc, t) => acc + t.fee, 0))}
-                />
+                <StatCard label="Комиссии" value={fmt(activeMonthFee)} />
                 <StatCard
                   label="Фандинг"
                   value={
-                    (() => {
-                      const totalFunding = currentMonthTrades.reduce((acc, t) => acc + t.funding, 0);
-                      return (
-                        <span className={totalFunding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
-                          {totalFunding >= 0 ? "+" : ""}
-                          {fmt(totalFunding)}
-                        </span>
-                      );
-                    })()
+                    <span className={activeMonthFunding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
+                      {activeMonthFunding >= 0 ? "+" : ""}
+                      {fmt(activeMonthFunding)}
+                    </span>
                   }
                 />
               </>
@@ -498,25 +531,49 @@ export default function DashboardPage() {
                   <Tooltip
                     cursor={{ fill: "var(--color-surface-hover)" }}
                     contentStyle={{
-                      background: "var(--chart-tooltip-bg)",
-                      border: "1px solid var(--color-border)",
+                      background: "#1a1f2e",
+                      border: "1px solid #2a3142",
                       borderRadius: 8,
                       fontFamily: "var(--font-mono)",
-                      color: "var(--chart-tooltip-text)",
+                      color: "#ffffff",
                     }}
-                    labelStyle={{ color: "var(--chart-tooltip-text)" }}
-                    itemStyle={{ color: "var(--chart-tooltip-text)" }}
+                    labelStyle={{ color: "#8b95a5" }}
+                    itemStyle={{ color: "#ffffff" }}
                   />
-                  <Bar dataKey="netPnl" radius={[4, 4, 0, 0]}>
-                    {chartData.map((d, i) => (
-                      <Cell key={i} fill={d.netPnl >= 0 ? "var(--color-profit)" : "var(--color-loss)"} />
-                    ))}
+                  <Bar
+                    dataKey="netPnl"
+                    radius={[4, 4, 0, 0]}
+                    cursor="pointer"
+                    onClick={(data: { payload?: { month?: string } }) => {
+                      if (data?.payload?.month) selectMonth(data.payload.month);
+                    }}
+                  >
+                    {chartData.map((d, i) => {
+                      const isSelected = d.month === activeMonth;
+                      const baseColor = d.netPnl >= 0 ? "var(--color-profit)" : "var(--color-loss)";
+                      // Выбранный столбец — полная непрозрачность + синяя рамка.
+                      // Остальные — приглушенные (0.4), чтобы выбранный выделялся.
+                      return (
+                        <Cell
+                          key={i}
+                          fill={baseColor}
+                          fillOpacity={isSelected ? 1 : 0.4}
+                          stroke={isSelected ? "var(--color-accent)" : "none"}
+                          strokeWidth={isSelected ? 2 : 0}
+                        />
+                      );
+                    })}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
-              <div className="text-xs text-[var(--color-text-faint)] mt-3">
-                {filteredTrades.length} сделок · {chartData.length} месяцев
-                {isFilterActive && " · фильтр активен"}
+              <div className="text-xs text-[var(--color-text-faint)] mt-3 flex items-center justify-between flex-wrap gap-2">
+                <span>
+                  {filteredTrades.length} сделок · {chartData.length} месяцев
+                  {isFilterActive && " · фильтр активен"}
+                </span>
+                <span className="text-[var(--color-text-faint)]">
+                  💡 Кликните по столбцу для статистики месяца
+                </span>
               </div>
             </>
           )}
