@@ -9,32 +9,11 @@ import SyncButton from "@/components/dashboard/SyncButton";
 import MonthStats from "@/components/dashboard/MonthStats";
 import GraphTabs from "@/components/dashboard/GraphTabs";
 import RecentTrades from "@/components/dashboard/RecentTrades";
+import PnlValue from "@/components/ui/PnlValue";
 import { useExchangeFilter } from "@/components/dashboard/useExchangeFilter";
 import { useSelectedMonth } from "@/components/dashboard/useSelectedMonth";
 
 const GRAPH_TAB_STORAGE_KEY = "futures-tracker-graph-tab";
-
-function fmt(n: number): string {
-  return n.toLocaleString("ru-RU", {
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 2,
-  });
-}
-
-function PnlValue({ value, size = "md" }: { value: number; size?: "md" | "lg" | "xl" }) {
-  const positive = value >= 0;
-  const sizeClass = size === "xl" ? "text-4xl" : size === "lg" ? "text-2xl" : "text-xl";
-  return (
-    <span
-      className={`font-mono-tabular font-semibold ${sizeClass} ${
-        positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
-      }`}
-    >
-      {positive ? "+" : ""}
-      {fmt(value)}
-    </span>
-  );
-}
 
 function loadGraphTab(): "balance" | "pnl" {
   if (typeof window === "undefined") return "balance";

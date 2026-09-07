@@ -1,5 +1,7 @@
 "use client";
 
+import StatCard from "@/components/ui/StatCard";
+
 interface UserMonthStatsProps {
   month: string;
   tradesCount: number;
@@ -27,20 +29,9 @@ function fmtPnl(n: number): string {
   return sign + n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
 }
 
-function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="card p-3">
-      <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-1">
-        {label}
-      </div>
-      <div className="font-mono-tabular text-lg">{value}</div>
-    </div>
-  );
-}
-
 /**
  * Блок статистики выбранного месяца для детальной страницы пользователя в админке.
- * Компактнее дашбордного (8 карточек вместо 8, но меньше padding/text).
+ * Компактнее дашбордного (variant="compact" → p-3, text-lg).
  */
 export default function UserMonthStats({
   month,
@@ -77,7 +68,7 @@ export default function UserMonthStats({
         )}
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-        <StatCard label="Сделок" value={String(tradesCount)} />
+        <StatCard label="Сделок" value={String(tradesCount)} variant="compact" />
         <StatCard
           label="Приб / Убыт"
           value={
@@ -87,42 +78,37 @@ export default function UserMonthStats({
               <span className="text-[var(--color-loss)]">{lossCount}</span>
             </span>
           }
+          variant="compact"
         />
-        <StatCard label="Win-rate" value={`${winRate}%`} />
+        <StatCard label="Win-rate" value={`${winRate}%`} variant="compact" />
         <StatCard
           label="Итог месяца"
           value={
-            <span
-              className={
-                netPnl >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
-              }
-            >
+            <span className={netPnl >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
               {fmtPnl(netPnl)}
             </span>
           }
+          variant="compact"
         />
         <StatCard
           label="Общая прибыль"
-          value={
-            <span className="text-[var(--color-profit)]">{fmtPnl(grossProfit)}</span>
-          }
+          value={<span className="text-[var(--color-profit)]">{fmtPnl(grossProfit)}</span>}
+          variant="compact"
         />
         <StatCard
           label="Общий убыток"
           value={<span className="text-[var(--color-loss)]">{fmtPnl(grossLoss)}</span>}
+          variant="compact"
         />
-        <StatCard label="Комиссии" value={fmt(fee)} />
+        <StatCard label="Комиссии" value={fmt(fee)} variant="compact" />
         <StatCard
           label="Фандинг"
           value={
-            <span
-              className={
-                funding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
-              }
-            >
+            <span className={funding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
               {fmtPnl(funding)}
             </span>
           }
+          variant="compact"
         />
       </div>
     </div>

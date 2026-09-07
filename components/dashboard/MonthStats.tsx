@@ -1,5 +1,9 @@
 "use client";
 
+import StatCard from "@/components/ui/StatCard";
+import PnlValue from "@/components/ui/PnlValue";
+import SkeletonCard from "@/components/ui/SkeletonCard";
+
 interface MonthStatsProps {
   month: string;
   tradesCount: number;
@@ -22,40 +26,6 @@ function fmt(n: number): string {
     maximumFractionDigits: 2,
     minimumFractionDigits: 2,
   });
-}
-
-function PnlValue({ value }: { value: number }) {
-  const positive = value >= 0;
-  return (
-    <span
-      className={`font-mono-tabular text-2xl font-semibold ${
-        positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
-      }`}
-    >
-      {positive ? "+" : ""}
-      {fmt(value)}
-    </span>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="card p-4">
-      <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-2">
-        {label}
-      </div>
-      <div className="font-mono-tabular text-2xl">{value}</div>
-    </div>
-  );
-}
-
-function SkeletonCard() {
-  return (
-    <div className="card p-4">
-      <div className="skeleton h-3 w-20 mb-2" />
-      <div className="skeleton h-7 w-24" />
-    </div>
-  );
 }
 
 /**
@@ -115,7 +85,7 @@ export default function MonthStats({
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         {tradesCount === 0 && netPnl === 0 ? (
-          // Скелетоны при загрузке (loading=true передаётся через 0/0)
+          // Скелетоны при загрузке
           <>
             <SkeletonCard />
             <SkeletonCard />

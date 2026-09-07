@@ -10,6 +10,7 @@ import {
   CartesianGrid,
   Cell,
 } from "recharts";
+import ChartTooltip from "@/components/ui/ChartTooltip";
 
 interface PnLChartProps {
   data: { month: string; netPnl: number; trades: number }[];
@@ -54,15 +55,7 @@ export default function PnLChart({
           />
           <Tooltip
             cursor={{ fill: "var(--color-surface-hover)" }}
-            contentStyle={{
-              background: "#1a1f2e",
-              border: "1px solid #2a3142",
-              borderRadius: 8,
-              fontFamily: "var(--font-mono)",
-              color: "#ffffff",
-            }}
-            labelStyle={{ color: "#8b95a5" }}
-            itemStyle={{ color: "#ffffff" }}
+            content={<ChartTooltip />}
           />
           <Bar
             dataKey="netPnl"
