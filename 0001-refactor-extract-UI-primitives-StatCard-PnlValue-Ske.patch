@@ -1,0 +1,479 @@
+From 1afc2c846fae18552dc209f7e0d18b62a75530a8 Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Mon, 7 Sep 2026 18:04:54 +0000
+Subject: [PATCH] =?UTF-8?q?refactor:=20extract=20UI=20primitives=20?=
+ =?UTF-8?q?=E2=80=94=20StatCard,=20PnlValue,=20SkeletonCard,=20ChartToolti?=
+ =?UTF-8?q?p?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Этап A: вынесены 4 переиспользуемых UI-примитива в components/ui/.
+
+## Новые файлы (components/ui/)
+
+- PnlValue.tsx (45 строк) — цветной PnL (зелёный/красный).
+  Размеры: sm (text-lg), md (text-xl), lg (text-2xl), xl (text-4xl).
+  Используется в MonthStats, UserMonthStats, app/page.tsx (итог дашборда).
+
+- StatCard.tsx (28 строк) — карточка с label + value.
+  Варианты: default (p-4, text-2xl), compact (p-3, text-lg).
+  Используется в MonthStats, UserMonthStats, общая статистика админки.
+
+- SkeletonCard.tsx (17 строк) — заглушка при загрузке.
+  Варианты: default (p-4), compact (p-3).
+
+- ChartTooltip.tsx (34 строк) — тёмный tooltip для recharts.
+  Тёмно-синий фон (#1a1f2e), белый текст, не зависит от темы.
+  Используется в PnLChart, UserPnLChart.
+  НЕ используется в BalanceChart (там кастомный formatter).
+
+## Обновлённые файлы
+
+- MonthStats.tsx: убраны локальные PnlValue, StatCard, SkeletonCard.
+  Импортирует из components/ui/. Сокращение ~12 строк.
+
+- UserMonthStats.tsx: убран локальный StatCard. Импортирует из ui/.
+  variant='compact' для админки. Сокращение ~15 строк.
+
+- PnLChart.tsx: убран inline contentStyle/labelStyle/itemStyle.
+  content={<ChartTooltip />} — 1 строка вместо 10.
+
+- UserPnLChart.tsx: то же самое.
+
+- app/page.tsx: убрана локальная PnlValue + fmt(). Импортирует из ui/.
+  Сокращение ~15 строк. Теперь 193 строки (было ~215).
+
+## Что это даёт
+
+1. Один источник правды для стилей — изменить PnlValue в одном месте,
+   обновится везде.
+2. Размеры/варианты через props — compact для админки, default для
+   дашборда.
+3. Меньше дублирования — tooltip стили были повторены 3 раза.
+4. Готовность к этапу D — MonthStats и UserMonthStats можно объединить,
+   используя variant prop.
+---
+ app/page.tsx                        | 23 +--------------
+ components/admin/UserMonthStats.tsx | 42 +++++++++------------------
+ components/admin/UserPnLChart.tsx   | 11 ++-----
+ components/dashboard/MonthStats.tsx | 40 ++++---------------------
+ components/dashboard/PnLChart.tsx   | 11 ++-----
+ components/ui/ChartTooltip.tsx      | 34 ++++++++++++++++++++++
+ components/ui/PnlValue.tsx          | 45 +++++++++++++++++++++++++++++
+ components/ui/SkeletonCard.tsx      | 17 +++++++++++
+ components/ui/StatCard.tsx          | 28 ++++++++++++++++++
+ 9 files changed, 148 insertions(+), 103 deletions(-)
+ create mode 100644 components/ui/ChartTooltip.tsx
+ create mode 100644 components/ui/PnlValue.tsx
+ create mode 100644 components/ui/SkeletonCard.tsx
+ create mode 100644 components/ui/StatCard.tsx
+
+diff --git a/app/page.tsx b/app/page.tsx
+index cd6dfaf..d8ab647 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -9,33 +9,12 @@ import SyncButton from "@/components/dashboard/SyncButton";
+ import MonthStats from "@/components/dashboard/MonthStats";
+ import GraphTabs from "@/components/dashboard/GraphTabs";
+ import RecentTrades from "@/components/dashboard/RecentTrades";
++import PnlValue from "@/components/ui/PnlValue";
+ import { useExchangeFilter } from "@/components/dashboard/useExchangeFilter";
+ import { useSelectedMonth } from "@/components/dashboard/useSelectedMonth";
+ 
+ const GRAPH_TAB_STORAGE_KEY = "futures-tracker-graph-tab";
+ 
+-function fmt(n: number): string {
+-  return n.toLocaleString("ru-RU", {
+-    maximumFractionDigits: 2,
+-    minimumFractionDigits: 2,
+-  });
+-}
+-
+-function PnlValue({ value, size = "md" }: { value: number; size?: "md" | "lg" | "xl" }) {
+-  const positive = value >= 0;
+-  const sizeClass = size === "xl" ? "text-4xl" : size === "lg" ? "text-2xl" : "text-xl";
+-  return (
+-    <span
+-      className={`font-mono-tabular font-semibold ${sizeClass} ${
+-        positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
+-      }`}
+-    >
+-      {positive ? "+" : ""}
+-      {fmt(value)}
+-    </span>
+-  );
+-}
+-
+ function loadGraphTab(): "balance" | "pnl" {
+   if (typeof window === "undefined") return "balance";
+   try {
+diff --git a/components/admin/UserMonthStats.tsx b/components/admin/UserMonthStats.tsx
+index 765bcc4..51a79b0 100644
+--- a/components/admin/UserMonthStats.tsx
++++ b/components/admin/UserMonthStats.tsx
+@@ -1,5 +1,7 @@
+ "use client";
+ 
++import StatCard from "@/components/ui/StatCard";
++
+ interface UserMonthStatsProps {
+   month: string;
+   tradesCount: number;
+@@ -27,20 +29,9 @@ function fmtPnl(n: number): string {
+   return sign + n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+ }
+ 
+-function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
+-  return (
+-    <div className="card p-3">
+-      <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-1">
+-        {label}
+-      </div>
+-      <div className="font-mono-tabular text-lg">{value}</div>
+-    </div>
+-  );
+-}
+-
+ /**
+  * Блок статистики выбранного месяца для детальной страницы пользователя в админке.
+- * Компактнее дашбордного (8 карточек вместо 8, но меньше padding/text).
++ * Компактнее дашбордного (variant="compact" → p-3, text-lg).
+  */
+ export default function UserMonthStats({
+   month,
+@@ -77,7 +68,7 @@ export default function UserMonthStats({
+         )}
+       </div>
+       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+-        <StatCard label="Сделок" value={String(tradesCount)} />
++        <StatCard label="Сделок" value={String(tradesCount)} variant="compact" />
+         <StatCard
+           label="Приб / Убыт"
+           value={
+@@ -87,42 +78,37 @@ export default function UserMonthStats({
+               <span className="text-[var(--color-loss)]">{lossCount}</span>
+             </span>
+           }
++          variant="compact"
+         />
+-        <StatCard label="Win-rate" value={`${winRate}%`} />
++        <StatCard label="Win-rate" value={`${winRate}%`} variant="compact" />
+         <StatCard
+           label="Итог месяца"
+           value={
+-            <span
+-              className={
+-                netPnl >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
+-              }
+-            >
++            <span className={netPnl >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
+               {fmtPnl(netPnl)}
+             </span>
+           }
++          variant="compact"
+         />
+         <StatCard
+           label="Общая прибыль"
+-          value={
+-            <span className="text-[var(--color-profit)]">{fmtPnl(grossProfit)}</span>
+-          }
++          value={<span className="text-[var(--color-profit)]">{fmtPnl(grossProfit)}</span>}
++          variant="compact"
+         />
+         <StatCard
+           label="Общий убыток"
+           value={<span className="text-[var(--color-loss)]">{fmtPnl(grossLoss)}</span>}
++          variant="compact"
+         />
+-        <StatCard label="Комиссии" value={fmt(fee)} />
++        <StatCard label="Комиссии" value={fmt(fee)} variant="compact" />
+         <StatCard
+           label="Фандинг"
+           value={
+-            <span
+-              className={
+-                funding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
+-              }
+-            >
++            <span className={funding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
+               {fmtPnl(funding)}
+             </span>
+           }
++          variant="compact"
+         />
+       </div>
+     </div>
+diff --git a/components/admin/UserPnLChart.tsx b/components/admin/UserPnLChart.tsx
+index b29f1c8..ba8aaf0 100644
+--- a/components/admin/UserPnLChart.tsx
++++ b/components/admin/UserPnLChart.tsx
+@@ -10,6 +10,7 @@ import {
+   CartesianGrid,
+   Cell,
+ } from "recharts";
++import ChartTooltip from "@/components/ui/ChartTooltip";
+ 
+ interface UserPnLChartProps {
+   data: { month: string; netPnl: number }[];
+@@ -50,15 +51,7 @@ export default function UserPnLChart({
+           />
+           <Tooltip
+             cursor={{ fill: "var(--color-surface-hover)" }}
+-            contentStyle={{
+-              background: "#1a1f2e",
+-              border: "1px solid #2a3142",
+-              borderRadius: 8,
+-              fontFamily: "var(--font-mono)",
+-              color: "#ffffff",
+-            }}
+-            labelStyle={{ color: "#8b95a5" }}
+-            itemStyle={{ color: "#ffffff" }}
++            content={<ChartTooltip />}
+           />
+           <Bar
+             dataKey="netPnl"
+diff --git a/components/dashboard/MonthStats.tsx b/components/dashboard/MonthStats.tsx
+index 72c41a3..968a389 100644
+--- a/components/dashboard/MonthStats.tsx
++++ b/components/dashboard/MonthStats.tsx
+@@ -1,5 +1,9 @@
+ "use client";
+ 
++import StatCard from "@/components/ui/StatCard";
++import PnlValue from "@/components/ui/PnlValue";
++import SkeletonCard from "@/components/ui/SkeletonCard";
++
+ interface MonthStatsProps {
+   month: string;
+   tradesCount: number;
+@@ -24,40 +28,6 @@ function fmt(n: number): string {
+   });
+ }
+ 
+-function PnlValue({ value }: { value: number }) {
+-  const positive = value >= 0;
+-  return (
+-    <span
+-      className={`font-mono-tabular text-2xl font-semibold ${
+-        positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"
+-      }`}
+-    >
+-      {positive ? "+" : ""}
+-      {fmt(value)}
+-    </span>
+-  );
+-}
+-
+-function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
+-  return (
+-    <div className="card p-4">
+-      <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-2">
+-        {label}
+-      </div>
+-      <div className="font-mono-tabular text-2xl">{value}</div>
+-    </div>
+-  );
+-}
+-
+-function SkeletonCard() {
+-  return (
+-    <div className="card p-4">
+-      <div className="skeleton h-3 w-20 mb-2" />
+-      <div className="skeleton h-7 w-24" />
+-    </div>
+-  );
+-}
+-
+ /**
+  * Блок статистики выбранного месяца — 9 карточек в сетке 3×3.
+  * Заголовок показывает: Статистика {month} (выбран|текущий) (отфильтровано).
+@@ -115,7 +85,7 @@ export default function MonthStats({
+       </div>
+       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+         {tradesCount === 0 && netPnl === 0 ? (
+-          // Скелетоны при загрузке (loading=true передаётся через 0/0)
++          // Скелетоны при загрузке
+           <>
+             <SkeletonCard />
+             <SkeletonCard />
+diff --git a/components/dashboard/PnLChart.tsx b/components/dashboard/PnLChart.tsx
+index b03415a..ee321e1 100644
+--- a/components/dashboard/PnLChart.tsx
++++ b/components/dashboard/PnLChart.tsx
+@@ -10,6 +10,7 @@ import {
+   CartesianGrid,
+   Cell,
+ } from "recharts";
++import ChartTooltip from "@/components/ui/ChartTooltip";
+ 
+ interface PnLChartProps {
+   data: { month: string; netPnl: number; trades: number }[];
+@@ -54,15 +55,7 @@ export default function PnLChart({
+           />
+           <Tooltip
+             cursor={{ fill: "var(--color-surface-hover)" }}
+-            contentStyle={{
+-              background: "#1a1f2e",
+-              border: "1px solid #2a3142",
+-              borderRadius: 8,
+-              fontFamily: "var(--font-mono)",
+-              color: "#ffffff",
+-            }}
+-            labelStyle={{ color: "#8b95a5" }}
+-            itemStyle={{ color: "#ffffff" }}
++            content={<ChartTooltip />}
+           />
+           <Bar
+             dataKey="netPnl"
+diff --git a/components/ui/ChartTooltip.tsx b/components/ui/ChartTooltip.tsx
+new file mode 100644
+index 0000000..58a8031
+--- /dev/null
++++ b/components/ui/ChartTooltip.tsx
+@@ -0,0 +1,34 @@
++import { TooltipProps } from "recharts";
++
++/**
++ * Тёмный tooltip для recharts — белый текст на тёмно-синем фоне.
++ * Один стиль для всех графиков (PnLChart, BalanceChart, UserPnLChart).
++ * Не зависит от темы — всегда тёмный, как у TradingView/Binance.
++ */
++export default function ChartTooltip(props: TooltipProps<number, string>) {
++  const { active, payload, label } = props;
++  if (!active || !payload || payload.length === 0) return null;
++
++  return (
++    <div
++      style={{
++        background: "#1a1f2e",
++        border: "1px solid #2a3142",
++        borderRadius: 8,
++        padding: "8px 12px",
++        fontFamily: "var(--font-mono)",
++        fontSize: 12,
++        color: "#ffffff",
++      }}
++    >
++      {label && (
++        <div style={{ color: "#8b95a5", marginBottom: 4 }}>{label}</div>
++      )}
++      {payload.map((entry, i) => (
++        <div key={i} style={{ color: "#ffffff" }}>
++          {entry.name}: {entry.value}
++        </div>
++      ))}
++    </div>
++  );
++}
+diff --git a/components/ui/PnlValue.tsx b/components/ui/PnlValue.tsx
+new file mode 100644
+index 0000000..e303129
+--- /dev/null
++++ b/components/ui/PnlValue.tsx
+@@ -0,0 +1,45 @@
++/**
++ * Цветной PnL — зелёный для прибыли, красный для убытка.
++ * Переиспользуется на дашборде, в админке, в карточках и заголовках.
++ *
++ * Размеры:
++ *   sm  — text-lg (в карточках админки)
++ *   md  — text-xl (в карточках дашборда)
++ *   lg  — text-2xl (крупные значения)
++ *   xl  — text-4xl (итог на дашборде)
++ */
++function fmt(n: number): string {
++  return n.toLocaleString("ru-RU", {
++    maximumFractionDigits: 2,
++    minimumFractionDigits: 2,
++  });
++}
++
++const sizeClass = {
++  sm: "text-lg",
++  md: "text-xl",
++  lg: "text-2xl",
++  xl: "text-4xl",
++};
++
++export default function PnlValue({
++  value,
++  size = "md",
++  semibold = true,
++}: {
++  value: number;
++  size?: "sm" | "md" | "lg" | "xl";
++  semibold?: boolean;
++}) {
++  const positive = value >= 0;
++  return (
++    <span
++      className={`font-mono-tabular ${sizeClass[size]} ${
++        semibold ? "font-semibold" : ""
++      } ${positive ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}`}
++    >
++      {positive ? "+" : ""}
++      {fmt(value)}
++    </span>
++  );
++}
+diff --git a/components/ui/SkeletonCard.tsx b/components/ui/SkeletonCard.tsx
+new file mode 100644
+index 0000000..99ab623
+--- /dev/null
++++ b/components/ui/SkeletonCard.tsx
+@@ -0,0 +1,17 @@
++/**
++ * Skeleton-карточка — заглушка при загрузке данных.
++ * Показывает анимированный shimmer вместо реальных значений.
++ */
++export default function SkeletonCard({
++  variant = "default",
++}: {
++  variant?: "default" | "compact";
++}) {
++  const padding = variant === "compact" ? "p-3" : "p-4";
++  return (
++    <div className={`card ${padding}`}>
++      <div className="skeleton h-3 w-20 mb-2" />
++      <div className="skeleton h-7 w-24" />
++    </div>
++  );
++}
+diff --git a/components/ui/StatCard.tsx b/components/ui/StatCard.tsx
+new file mode 100644
+index 0000000..cdbbbbf
+--- /dev/null
++++ b/components/ui/StatCard.tsx
+@@ -0,0 +1,28 @@
++/**
++ * Карточка статистики — label (сверху, мелкий) + value (крупный).
++ * Переиспользуется в MonthStats, UserMonthStats, общая статистика админки.
++ *
++ * Размеры:
++ *   default — p-4, text-2xl (дашборд)
++ *   compact — p-3, text-lg (админка)
++ */
++export default function StatCard({
++  label,
++  value,
++  variant = "default",
++}: {
++  label: string;
++  value: React.ReactNode;
++  variant?: "default" | "compact";
++}) {
++  const padding = variant === "compact" ? "p-3" : "p-4";
++  const textSize = variant === "compact" ? "text-lg" : "text-2xl";
++  return (
++    <div className={`card ${padding}`}>
++      <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-2">
++        {label}
++      </div>
++      <div className={`font-mono-tabular ${textSize}`}>{value}</div>
++    </div>
++  );
++}
+-- 
+2.47.3
+
