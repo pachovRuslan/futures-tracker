@@ -6,7 +6,7 @@ import Link from "next/link";
 import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 import { useSelectedMonth } from "@/components/dashboard/useSelectedMonth";
 import PnLChart from "@/components/dashboard/PnLChart";
-import UserMonthStats from "@/components/admin/UserMonthStats";
+import MonthStats from "@/components/dashboard/MonthStats";
 
 interface Profile {
   email: string;
@@ -359,7 +359,7 @@ export default function AdminUserDetailPage() {
 
           {/* Статистика выбранного месяца (кликабельная) */}
           {activeMonthDetail && (
-            <UserMonthStats
+            <MonthStats
               month={activeMonthDetail.month}
               tradesCount={Number(monthly.find((m) => m.month === activeMonth)?.trade_count ?? 0)}
               winCount={activeMonthDetail.winCount}
@@ -372,6 +372,7 @@ export default function AdminUserDetailPage() {
               funding={activeMonthDetail.funding}
               isSelected={!!selectedMonth}
               onResetMonth={resetMonth}
+              variant="compact"
             />
           )}
 

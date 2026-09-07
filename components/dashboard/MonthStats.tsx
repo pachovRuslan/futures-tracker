@@ -3,6 +3,7 @@
 import StatCard from "@/components/ui/StatCard";
 import PnlValue from "@/components/ui/PnlValue";
 import SkeletonCard from "@/components/ui/SkeletonCard";
+import { fmt, fmtPnl } from "@/lib/trade-model";
 
 interface MonthStatsProps {
   month: string;
@@ -15,34 +16,29 @@ interface MonthStatsProps {
   grossLoss: number;
   fee: number;
   funding: number;
-  totalWinRate: string; // win-rate за всё время (по всем сделкам)
-  isSelected: boolean; // месяц выбран кликом, не текущий
-  isFilterActive: boolean; // активен фильтр бирж
+  // Опциональные — только для дашборда (админка не передаёт)
+  totalWinRate?: string;
+  isFilterActive?: boolean;
+  isSelected: boolean;
   onResetMonth?: () => void;
-}
-
-function fmt(n: number): string {
-  return n.toLocaleString("ru-RU", {
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 2,
-  });
+  // variant: default — дашборд (9 карточек 3×3), compact — админка (8 карточек 4×2)
+  variant?: "default" | "compact";
 }
 
 /**
- * Блок статистики выбранного месяца — 9 карточек в сетке 3×3.
- * Заголовок показывает: Статистика {month} (выбран|текущий) (отфильтровано).
- * Кнопка «Сбросить месяц» — только если месяц выбран кликом.
+ * Блок статистики выбранного месяца.
+ * Переиспользуется на дашборде (variant="default") и в админке (variant="compact").
  *
- * 9 карточек:
- * 1. Сделок (за месяц)
- * 2. Приб / Убыт (за месяц)
- * 3. Win-rate (за месяц)
- * 4. Итог месяца
- * 5. Общая прибыль
- * 6. Общий убыток
- * 7. Комиссии
- * 8. Фандинг
- * 9. Win-rate за всё время
+ * variant="default" (дашборд):
+ *   - 9 карточек в сетке 3×3
+ *   - Есть «Win-rate за всё время»
+ *   - Бейдж «(отфильтровано)» при активном фильтре бирж
+ *   - StatCard p-4, text-2xl
+ *
+ * variant="compact" (админка):
+ *   - 8 карточек в сетке 2×4 (без «Win-rate за всё время»)
+ *   - Без бейджа «(отфильтровано)» (в админке нет фильтра бирж)
+ *   - StatCard p-3, text-lg
  */
 export default function MonthStats({
   month,
@@ -56,10 +52,18 @@ export default function MonthStats({
   fee,
   funding,
   totalWinRate,
+  isFilterActive = false,
   isSelected,
-  isFilterActive,
   onResetMonth,
+  variant = "default",
 }: MonthStatsProps) {
+  const isCompact = variant === "compact";
+  const gridClass = isCompact
+    ? "grid grid-cols-2 md:grid-cols-4 gap-2"
+    : "grid grid-cols-2 md:grid-cols-3 gap-3";
+  const skeletonCount = isCompact ? 8 : 9;
+  const isLoading = tradesCount === 0 && netPnl === 0;
+
   return (
     <div>
       <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
@@ -70,7 +74,7 @@ export default function MonthStats({
           ) : (
             <span className="ml-2 text-[var(--color-text-faint)]">(текущий)</span>
           )}
-          {isFilterActive && (
+          {!isCompact && isFilterActive && (
             <span className="ml-2 text-[var(--color-accent)]">(отфильтровано)</span>
           )}
         </div>
@@ -83,19 +87,55 @@ export default function MonthStats({
           </button>
         )}
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-        {tradesCount === 0 && netPnl === 0 ? (
-          // Скелетоны при загрузке
+      <div className={gridClass}>
+        {isLoading ? (
+          Array.from({ length: skeletonCount }).map((_, i) => (
+            <SkeletonCard key={i} variant={variant} />
+          ))
+        ) : isCompact ? (
           <>
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
+            <StatCard label="Сделок" value={String(tradesCount)} variant="compact" />
+            <StatCard
+              label="Приб / Убыт"
+              value={
+                <span>
+                  <span className="text-[var(--color-profit)]">{winCount}</span>
+                  {" / "}
+                  <span className="text-[var(--color-loss)]">{lossCount}</span>
+                </span>
+              }
+              variant="compact"
+            />
+            <StatCard label="Win-rate" value={`${winRate}%`} variant="compact" />
+            <StatCard
+              label="Итог месяца"
+              value={
+                <span className={netPnl >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
+                  {fmtPnl(netPnl)}
+                </span>
+              }
+              variant="compact"
+            />
+            <StatCard
+              label="Общая прибыль"
+              value={<span className="text-[var(--color-profit)]">{fmtPnl(grossProfit)}</span>}
+              variant="compact"
+            />
+            <StatCard
+              label="Общий убыток"
+              value={<span className="text-[var(--color-loss)]">{fmtPnl(grossLoss)}</span>}
+              variant="compact"
+            />
+            <StatCard label="Комиссии" value={fmt(fee)} variant="compact" />
+            <StatCard
+              label="Фандинг"
+              value={
+                <span className={funding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
+                  {fmtPnl(funding)}
+                </span>
+              }
+              variant="compact"
+            />
           </>
         ) : (
           <>
@@ -118,13 +158,7 @@ export default function MonthStats({
             <StatCard
               label="Фандинг"
               value={
-                <span
-                  className={
-                    funding >= 0
-                      ? "text-[var(--color-profit)]"
-                      : "text-[var(--color-loss)]"
-                  }
-                >
+                <span className={funding >= 0 ? "text-[var(--color-profit)]" : "text-[var(--color-loss)]"}>
                   {funding >= 0 ? "+" : ""}
                   {fmt(funding)}
                 </span>
@@ -132,7 +166,7 @@ export default function MonthStats({
             />
             <StatCard
               label="Win-rate за всё время"
-              value={`${totalWinRate}%`}
+              value={`${totalWinRate ?? "0"}%`}
             />
           </>
         )}
