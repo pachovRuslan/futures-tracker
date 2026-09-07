@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import type { MonthlySummary, Trade } from "@/lib/types";
-import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+import type { Trade } from "@/lib/types";
 import BalanceChart from "@/components/BalanceChart";
 import ExchangeFilter from "@/components/dashboard/ExchangeFilter";
 import SyncButton from "@/components/dashboard/SyncButton";
@@ -12,8 +11,17 @@ import RecentTrades from "@/components/dashboard/RecentTrades";
 import PnlValue from "@/components/ui/PnlValue";
 import { useExchangeFilter } from "@/components/dashboard/useExchangeFilter";
 import { useSelectedMonth } from "@/components/dashboard/useSelectedMonth";
+import {
+  filterTradesByExchanges,
+  calculateTotalNetPnl,
+  groupTradesByMonth,
+  calculateMonthStats,
+  calculateAllTimeWinRate,
+  getActiveMonth,
+} from "@/lib/trade-model";
 
 const GRAPH_TAB_STORAGE_KEY = "futures-tracker-graph-tab";
+const ALL_EXCHANGES_COUNT = 7; // 6 бирж + manual
 
 function loadGraphTab(): "balance" | "pnl" {
   if (typeof window === "undefined") return "balance";
@@ -28,14 +36,11 @@ export default function DashboardPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Хук фильтра бирж (вынесен в компонент)
   const { selectedExchanges, toggleExchange, selectAllExchanges, isFilterActive } =
     useExchangeFilter();
 
-  // Хук выбранного месяца (вынесен в компонент)
   const { selectedMonth, selectMonth, resetMonth } = useSelectedMonth();
 
-  // Активный график
   const [graphTab, setGraphTab] = useState<"balance" | "pnl">("balance");
 
   useEffect(() => {
@@ -61,66 +66,14 @@ export default function DashboardPage() {
     } catch {}
   }
 
-  // === ФИЛЬТРАЦИЯ СДЕЛОК ПО ВЫБРАННЫМ БИРЖАМ ===
-  const filteredTrades = trades.filter((t) =>
-    selectedExchanges.has(t.exchange as (typeof EXCHANGES)[number] | "manual")
-  );
+  // === БИЗНЕС-ЛОГИКА (вся в lib/trade-model.ts) ===
+  const filteredTrades = filterTradesByExchanges(trades, selectedExchanges);
+  const totalNet = calculateTotalNetPnl(filteredTrades);
+  const chartData = groupTradesByMonth(filteredTrades);
+  const activeMonth = getActiveMonth(selectedMonth, chartData);
+  const monthStats = activeMonth ? calculateMonthStats(filteredTrades, activeMonth) : null;
+  const totalWinRate = calculateAllTimeWinRate(filteredTrades);
 
-  // Итог PnL по выбранным биржам
-  const totalNet = filteredTrades.reduce(
-    (acc, t) => acc + (t.realized_pnl - t.fee + t.funding),
-    0
-  );
-
-  // === ГРАФИК PnL ПО МЕСЯЦАМ ===
-  const chartData = (() => {
-    const byMonth = new Map<string, { netPnl: number; trades: number }>();
-    for (const t of filteredTrades) {
-      const month = t.closed_at.slice(0, 7);
-      const net = t.realized_pnl - t.fee + t.funding;
-      const existing = byMonth.get(month) ?? { netPnl: 0, trades: 0 };
-      existing.netPnl += net;
-      existing.trades += 1;
-      byMonth.set(month, existing);
-    }
-    return Array.from(byMonth.entries())
-      .map(([month, v]) => ({ month, netPnl: v.netPnl, trades: v.trades }))
-      .sort((a, b) => a.month.localeCompare(b.month));
-  })();
-
-  // === ВЫБРАННЫЙ МЕСЯЦ ===
-  const activeMonth =
-    selectedMonth ?? chartData[chartData.length - 1]?.month ?? null;
-
-  const activeMonthTrades = activeMonth
-    ? filteredTrades.filter((t) => t.closed_at.slice(0, 7) === activeMonth)
-    : [];
-
-  const activeMonthNetPnls = activeMonthTrades.map(
-    (t) => t.realized_pnl - t.fee + t.funding
-  );
-  const winCount = activeMonthNetPnls.filter((p) => p > 0).length;
-  const lossCount = activeMonthNetPnls.filter((p) => p <= 0).length;
-  const grossProfit = activeMonthNetPnls.filter((p) => p > 0).reduce((a, b) => a + b, 0);
-  const grossLoss = activeMonthNetPnls.filter((p) => p <= 0).reduce((a, b) => a + b, 0);
-  const activeMonthNetPnl = activeMonthNetPnls.reduce((a, b) => a + b, 0);
-  const activeMonthFee = activeMonthTrades.reduce((acc, t) => acc + t.fee, 0);
-  const activeMonthFunding = activeMonthTrades.reduce((acc, t) => acc + t.funding, 0);
-  const activeMonthWinRate =
-    activeMonthTrades.length > 0
-      ? ((winCount / activeMonthTrades.length) * 100).toFixed(1)
-      : "0";
-
-  // Win-rate за всё время — по всем отфильтрованным сделкам (а не только за месяц).
-  // Считаем сделки с net PnL > 0 как прибыльные, <= 0 как убыточные.
-  const allTimeNetPnls = filteredTrades.map((t) => t.realized_pnl - t.fee + t.funding);
-  const allTimeWinCount = allTimeNetPnls.filter((p) => p > 0).length;
-  const totalWinRate =
-    allTimeNetPnls.length > 0
-      ? ((allTimeWinCount / allTimeNetPnls.length) * 100).toFixed(1)
-      : "0";
-
-  // Последние 5 сделок с учётом фильтра
   const recentTrades = filteredTrades.slice(0, 5);
 
   return (
@@ -137,9 +90,9 @@ export default function DashboardPage() {
             <PnlValue value={totalNet} size="xl" />
           )}
           <div className="text-xs text-[var(--color-text-faint)] mt-1">
-            {selectedExchanges.size === 7
+            {selectedExchanges.size === ALL_EXCHANGES_COUNT
               ? "Все биржи"
-              : `${selectedExchanges.size} из 7 бирж`}
+              : `${selectedExchanges.size} из ${ALL_EXCHANGES_COUNT} бирж`}
             {" · "}
             {filteredTrades.length} сделок
           </div>
@@ -156,18 +109,18 @@ export default function DashboardPage() {
       />
 
       {/* Статистика выбранного месяца */}
-      {activeMonth && (
+      {activeMonth && monthStats && (
         <MonthStats
           month={activeMonth}
-          tradesCount={loading ? 0 : activeMonthTrades.length}
-          winCount={winCount}
-          lossCount={lossCount}
-          winRate={activeMonthWinRate}
-          netPnl={activeMonthNetPnl}
-          grossProfit={grossProfit}
-          grossLoss={grossLoss}
-          fee={activeMonthFee}
-          funding={activeMonthFunding}
+          tradesCount={loading ? 0 : monthStats.tradesCount}
+          winCount={monthStats.winCount}
+          lossCount={monthStats.lossCount}
+          winRate={monthStats.winRate}
+          netPnl={monthStats.netPnl}
+          grossProfit={monthStats.grossProfit}
+          grossLoss={monthStats.grossLoss}
+          fee={monthStats.fee}
+          funding={monthStats.funding}
           totalWinRate={totalWinRate}
           isSelected={!!selectedMonth}
           isFilterActive={isFilterActive}
