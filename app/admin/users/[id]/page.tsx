@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 import { useSelectedMonth } from "@/components/dashboard/useSelectedMonth";
-import UserPnLChart from "@/components/admin/UserPnLChart";
+import PnLChart from "@/components/dashboard/PnLChart";
 import UserMonthStats from "@/components/admin/UserMonthStats";
 
 interface Profile {
@@ -348,10 +348,11 @@ export default function AdminUserDetailPage() {
               <div className="text-xs uppercase tracking-widest text-[var(--color-text-faint)] mb-4">
                 PnL по месяцам
               </div>
-              <UserPnLChart
+              <PnLChart
                 data={chartData}
                 activeMonth={activeMonth}
                 onSelectMonth={selectMonth}
+                height={260}
               />
             </div>
           )}

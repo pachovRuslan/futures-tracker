@@ -8,7 +8,7 @@ interface GraphTabsProps {
   onTabChange: (tab: "balance" | "pnl") => void;
   isFilterActive: boolean;
   // Props для PnLChart
-  pnlData: { month: string; netPnl: number; trades: number }[];
+  pnlData: { month: string; netPnl: number }[];
   activeMonth: string | null;
   onSelectMonth: (month: string) => void;
   filteredTradesCount: number;

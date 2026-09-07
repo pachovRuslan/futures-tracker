@@ -13,31 +13,37 @@ import {
 import ChartTooltip from "@/components/ui/ChartTooltip";
 
 interface PnLChartProps {
-  data: { month: string; netPnl: number; trades: number }[];
+  data: { month: string; netPnl: number }[];
   activeMonth: string | null;
   onSelectMonth: (month: string) => void;
-  filteredTradesCount: number;
-  isFilterActive: boolean;
+  height?: number;
+  // Опциональные — только для дашборда (админка не передаёт)
+  filteredTradesCount?: number;
+  isFilterActive?: boolean;
 }
 
 /**
  * График PnL по месяцам с кликабельными столбцами.
- * Клик по столбцу → выбирает месяц, статистика сверху пересчитывается.
+ * Переиспользуется на дашборде (height=300) и в админке (height=260).
+ *
+ * Клик по столбцу → выбирает месяц, статистика пересчитывается.
  * Выбранный столбец — полная непрозрачность + синяя рамка.
  * Остальные — приглушенные (0.4).
  *
- * Tooltip — тёмный с белым текстом, не зависит от темы (хардкод).
+ * Footer: показывает «N сделок · M месяцев» если передан filteredTradesCount,
+ * иначе только «M месяцев».
  */
 export default function PnLChart({
   data,
   activeMonth,
   onSelectMonth,
+  height = 300,
   filteredTradesCount,
-  isFilterActive,
+  isFilterActive = false,
 }: PnLChartProps) {
   return (
     <>
-      <ResponsiveContainer width="100%" height={300}>
+      <ResponsiveContainer width="100%" height={height}>
         <BarChart data={data}>
           <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
           <XAxis
@@ -61,8 +67,8 @@ export default function PnLChart({
             dataKey="netPnl"
             radius={[4, 4, 0, 0]}
             cursor="pointer"
-            onClick={(data: { payload?: { month?: string } }) => {
-              if (data?.payload?.month) onSelectMonth(data.payload.month);
+            onClick={(d: { payload?: { month?: string } }) => {
+              if (d?.payload?.month) onSelectMonth(d.payload.month);
             }}
           >
             {data.map((d, i) => {
@@ -84,8 +90,11 @@ export default function PnLChart({
       </ResponsiveContainer>
       <div className="text-xs text-[var(--color-text-faint)] mt-3 flex items-center justify-between flex-wrap gap-2">
         <span>
-          {filteredTradesCount} сделок · {data.length} месяцев
-          {isFilterActive && " · фильтр активен"}
+          {filteredTradesCount !== undefined
+            ? `${filteredTradesCount} сделок · ${data.length} месяцев${
+                isFilterActive ? " · фильтр активен" : ""
+              }`
+            : `${data.length} месяцев`}
         </span>
         <span className="text-[var(--color-text-faint)]">
           💡 Кликните по столбцу для статистики месяца
