@@ -11,8 +11,8 @@ const envAllowedEmails = (process.env.ALLOWED_EMAILS ?? "")
   .filter(Boolean);
 
 // Список админов из env ADMIN_EMAILS — кто видит /admin и может управлять
-// allowlist. Это ОТДЕЛЬНЫЙ список от ALLOWED_EMAILS (который разрешает вход).
-const adminEmails = (process.env.ADMIN_EMAILS ?? "")
+// allowlist. Fallback на таблицу admin_emails в БД (см. migration_08).
+const envAdminEmails = (process.env.ADMIN_EMAILS ?? "")
   .split(",")
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean);
@@ -101,8 +101,9 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL("/not-allowed", request.url));
   }
 
-  // Защита админки: пути /admin и /api/admin/* требуют ADMIN_EMAILS.
-  // Если ADMIN_EMAILS не задан или текущий юзер не в нём — 403.
+  // Защита админки: пути /admin и /api/admin/* требуют admin.
+  // Проверяем admin_emails в БД (основной источник для SQL функций)
+  // + fallback на env ADMIN_EMAILS.
   // ВАЖНО: /api/debug/* — временные debug-эндпоинты, доступны любому
   // залогиненному юзеру (проверка внутри самого роута). Не подпадают
   // под admin-защиту.
@@ -112,10 +113,29 @@ export async function middleware(request: NextRequest) {
     !request.nextUrl.pathname.startsWith("/api/debug");
 
   if (isAdminPath) {
-    if (adminEmails.length === 0) {
-      return NextResponse.redirect(new URL("/not-allowed", request.url));
+    // Сначала проверяем env ADMIN_EMAILS (быстро, без запроса в БД)
+    let isAdmin = envAdminEmails.includes(email);
+
+    // Если в env не найден — проверяем таблицу admin_emails в БД
+    if (!isAdmin) {
+      try {
+        const { data: dbAdminEmails } = await supabase
+          .from("admin_emails")
+          .select("email");
+        if (dbAdminEmails) {
+          isAdmin = dbAdminEmails.some(
+            (row: { email: string }) => row.email.toLowerCase() === email
+          );
+        }
+      } catch (err) {
+        console.error(
+          "[middleware] Ошибка чтения admin_emails из БД, fallback на env:",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
     }
-    if (!adminEmails.includes(email)) {
+
+    if (!isAdmin) {
       return NextResponse.redirect(new URL("/not-allowed", request.url));
     }
   }
