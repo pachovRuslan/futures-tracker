@@ -2,7 +2,7 @@
 
 Личный трекер фьючерсных сделок с автосинком через read-only API-ключи: **6 бирж** (Bybit, Binance, Bitget, Bitunix, BingX, MEXC), дашборд с PnL по месяцам, ручной учёт спот- и фьючерс-баланса, мультитенантная авторизация через Google и админка для управления пользователями. Next.js 16 + Supabase + Tailwind 4, деплой на Vercel.
 
-> 📺 **Демо:** [https://futures-tracker-lake.vercel.app]`
+> 📺 **Демо:**  https://futures-tracker-lake.vercel.app 
 ---
 
 ## ✨ Возможности
