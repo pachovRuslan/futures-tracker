@@ -10,6 +10,12 @@ import { createServerSupabaseClient } from "@/lib/supabase-server";
 export const metadata: Metadata = {
   title: "Futures Tracker",
   description: "Личный трекер фьючерсных сделок: Bybit, Bitunix, Binance, Bitget, BingX, MEXC",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Futures Tracker",
+  },
 };
 
 // Предотвращаем FOUC (flash of unstyled content) — скрипт применяет тему
