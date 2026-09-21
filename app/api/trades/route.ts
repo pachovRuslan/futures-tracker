@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
-import type { ManualTradeInput } from "@/lib/types";
+import { ManualTradeInput } from "@/lib/validation";
 
 export async function GET(req: NextRequest) {
   try {
@@ -38,27 +38,24 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// Добавление сделки вручную (например, старые сделки, которые не подтянула биржа,
-// или сделки без API — просто заметки о торговле)
+// Добавление сделки вручную
 export async function POST(req: NextRequest) {
   try {
     const supabase = await createServerSupabaseClient();
-
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) {
-      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
-    }
+    if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
 
-    const body = (await req.json()) as ManualTradeInput;
-
-    if (!body.symbol || !body.side || !body.closed_at) {
+    // Валидация через zod
+    const parsed = ManualTradeInput.safeParse(await req.json());
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "symbol, side и closed_at обязательны" },
+        { error: "Некорректные данные", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
+    const body = parsed.data;
 
     const row = {
       user_id: user.id,

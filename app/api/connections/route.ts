@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 import { encrypt, maskKey } from "@/lib/crypto";
-import { REGISTRY, isValidExchange, getExchangeList } from "@/lib/exchanges";
+import { REGISTRY, EXCHANGES } from "@/lib/exchanges";
+import { ConnectionInput } from "@/lib/validation";
 
 // Список подключений — специально выбираем только безопасные колонки.
 // Даже случайно не отдадим *_encrypted наружу.
@@ -40,25 +41,16 @@ export async function POST(req: NextRequest) {
     } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
 
-    const body = await req.json();
-    const { exchange, apiKey, apiSecret, passphrase } = body as {
-      exchange: string;
-      apiKey: string;
-      apiSecret: string;
-      passphrase?: string;
-    };
-
-    if (!exchange || !apiKey || !apiSecret) {
+    const parsed = ConnectionInput.safeParse(await req.json());
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "exchange, apiKey и apiSecret обязательны" },
+        { error: "Некорректные данные", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
-    if (!isValidExchange(exchange)) {
-      return NextResponse.json({ error: "Неизвестная биржа" }, { status: 400 });
-    }
+    const { exchange, apiKey, apiSecret, passphrase } = parsed.data;
 
-    const adapter = REGISTRY[exchange];
+    const adapter = REGISTRY[exchange as (typeof EXCHANGES)[number]];
 
     // Для бирж с passphrase-схемой проверяем, что passphrase передан.
     if (adapter.credentialsSchema === "key+secret+passphrase" && !passphrase) {
@@ -120,10 +112,4 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-// GET-эндпоинт для UI: отдаёт список поддерживаемых бирж с их схемой credentials.
-// Используется формой подключения, чтобы знать, какие поля рендерить.
-export async function LIST() {
-  return NextResponse.json({ exchanges: getExchangeList() });
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin";
+import { AllowlistInput } from "@/lib/validation";
 
 // GET /api/admin/allowlist — список всех email-ов в allowlist
 export async function GET() {
@@ -56,16 +57,14 @@ export async function POST(req: NextRequest) {
     const { user, error, supabase } = await requireAdmin();
     if (error) return error;
 
-    const body = await req.json();
-    const { email, note } = body as { email: string; note?: string };
-
-    if (!email || !email.includes("@")) {
+    const parsed = AllowlistInput.safeParse(await req.json());
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Некорректный email" },
+        { error: "Некорректные данные", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
-
+    const { email, note } = parsed.data;
     const normalizedEmail = email.trim().toLowerCase();
 
     const { data, error: insertError } = await supabase

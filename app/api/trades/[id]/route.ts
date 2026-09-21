@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
+import { TradePatchInput } from "@/lib/validation";
 
 // PATCH: заметки можно редактировать у ЛЮБОЙ своей сделки (bybit/bitunix/manual).
 // Остальные поля (цена, qty, pnl и т.д.) можно менять только у ручных сделок —
@@ -19,7 +20,15 @@ export async function PATCH(
     if (!user) {
       return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
     }
-    const body = await req.json();
+    // Валидация через zod
+    const parsed = TradePatchInput.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: "Некорректные данные", details: parsed.error.flatten() },
+        { status: 400 }
+      );
+    }
+    const body = parsed.data;
 
     // Явный фильтр по user_id — defensive coding поверх RLS.
     const { data: existing, error: fetchError } = await supabase
@@ -32,7 +41,7 @@ export async function PATCH(
 
     const update: Record<string, unknown> = {};
 
-    if ("notes" in body) update.notes = body.notes;
+    if (body.notes !== undefined) update.notes = body.notes;
 
     if (existing.exchange === "manual") {
       const editableFields = [
@@ -46,9 +55,9 @@ export async function PATCH(
         "funding",
         "opened_at",
         "closed_at",
-      ];
+      ] as const;
       for (const field of editableFields) {
-        if (field in body) update[field] = body[field];
+        if (body[field] !== undefined) update[field] = body[field];
       }
     }
 

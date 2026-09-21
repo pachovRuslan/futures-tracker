@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase-server";
+import { BalanceSnapshotInput } from "@/lib/validation";
 
 // GET /api/balance — список снапшотов пользователя
 export async function GET() {
@@ -28,16 +29,11 @@ export async function GET() {
   }
 }
 
-// POST /api/balance — добавить или обновить снапшот (upsert по user+type+date)
-//
-// Поддержка двух режимов ввода (для удобства пользователя):
-//   1. Абсолют (по умолчанию): body.value_usd = итоговая сумма на дату.
-//      Например, value_usd: 1500 = "у меня сейчас $1500 на споте".
-//   2. Дельта: body.is_delta = true, body.value_usd = внесённое изменение.
-//      Например, value_usd: 200 = "пополнил спот на $200".
-//      Бэкенд сам находит последний снапшот до этой даты и прибавляет дельту:
-//      new_value = previous_value + delta. Если предыдущего нет — ошибка
-//      (первая точка должна быть абсолютной).
+// POST /api/balance — добавить или обновить снапшот
+// Поддержка двух режимов:
+//   1. Абсолют (по умолчанию): value_usd = итоговая сумма
+//   2. Дельта: is_delta=true, value_usd = изменение
+//      Бэкенд атомарно через RPC находит prev и прибавляет дельту.
 export async function POST(req: NextRequest) {
   try {
     const supabase = await createServerSupabaseClient();
@@ -46,69 +42,49 @@ export async function POST(req: NextRequest) {
     } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
 
-    const body = await req.json();
-    const { type, value_usd, snapshot_date, note, is_delta } = body as {
-      type: "spot" | "futures";
-      value_usd: number;
-      snapshot_date: string; // YYYY-MM-DD
-      note?: string;
-      is_delta?: boolean;
-    };
-
-    if (!type || value_usd === undefined || !snapshot_date) {
+    // Валидация через zod
+    const parsed = BalanceSnapshotInput.safeParse(await req.json());
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "type, value_usd и snapshot_date обязательны" },
+        { error: "Некорректные данные", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
-    if (!["spot", "futures"].includes(type)) {
-      return NextResponse.json({ error: "type должен быть 'spot' или 'futures'" }, { status: 400 });
-    }
+    const { type, value_usd, snapshot_date, note, is_delta } = parsed.data;
 
-    let finalValueUsd = value_usd;
-
-    // Если режим дельты — вычисляем итог из предыдущего снапшота.
+    // Режим дельты — через RPC (атомарно, без race condition)
     if (is_delta) {
-      const { data: prev, error: prevError } = await supabase
-        .from("balance_snapshots")
-        .select("value_usd, snapshot_date")
-        .eq("user_id", user.id)
-        .eq("type", type)
-        .lt("snapshot_date", snapshot_date)
-        .order("snapshot_date", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const { data: rpcResult, error: rpcError } = await supabase.rpc(
+        "apply_balance_delta",
+        {
+          p_user_id: user.id,
+          p_type: type,
+          p_snapshot_date: snapshot_date,
+          p_delta: value_usd,
+          p_note: note ?? null,
+        }
+      );
 
-      if (prevError) throw prevError;
+      if (rpcError) throw rpcError;
 
-      if (!prev) {
-        return NextResponse.json(
-          {
-            error:
-              "Невозможно использовать дельту для первой точки — предыдущего баланса нет. " +
-              "Выберите режим 'Итог' и введите полную сумму.",
-          },
-          { status: 400 }
-        );
+      // RPC возвращает JSON: { error: "..." } или { value_usd, previous_value, applied_delta }
+      if (rpcResult && typeof rpcResult === "object" && "error" in rpcResult) {
+        return NextResponse.json({ error: rpcResult.error }, { status: 400 });
       }
 
-      finalValueUsd = Number(prev.value_usd) + value_usd;
-
-      // Если итог получился отрицательным — это странно (баланс не может быть < 0).
-      // Разрешаем, но предупреждаем в ответе.
-      if (finalValueUsd < 0) {
-        console.warn(
-          `[balance] user=${user.id} type=${type} delta=${value_usd} resulted in negative balance ${finalValueUsd}`
-        );
-      }
+      return NextResponse.json({
+        ok: true,
+        snapshot: rpcResult,
+      });
     }
 
+    // Режим абсолюта — обычный upsert
     const row = {
       user_id: user.id,
       type,
-      value_usd: finalValueUsd,
+      value_usd,
       snapshot_date,
-      note: note || null,
+      note: note ?? null,
     };
 
     const { data, error } = await supabase
@@ -119,15 +95,10 @@ export async function POST(req: NextRequest) {
 
     if (error) throw error;
 
-    return NextResponse.json({
-      snapshot: data,
-      ...(is_delta ? { applied_delta: value_usd, previous_value: finalValueUsd - value_usd } : {}),
-    });
+    return NextResponse.json({ snapshot: data });
   } catch (err) {
-    console.error("Balance create error:", err instanceof Error ? err.message : String(err));
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error("Balance create error:", errMsg);
+    return NextResponse.json({ error: errMsg }, { status: 500 });
   }
 }
