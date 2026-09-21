@@ -1,0 +1,658 @@
+From 46746f018aab8e235f199f877b07acca59a4257f Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Mon, 21 Sep 2026 21:25:35 +0000
+Subject: [PATCH] cleanup: remove debug endpoint, fix .gitignore, fix Chinese
+ chars, new README
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Финальная очистка репозитория после code review:
+
+## Удалено
+- app/api/debug/bingx/route.ts — временный debug-эндпоинт (больше не нужен)
+- app/api/debug/ — пустая папка
+
+## Исправлено
+- .gitignore: '.env*.localtsconfig.tsbuildinfo' (склеено) → две строки
+  '.env*.local' + 'tsconfig.tsbuildinfo' (теперь игнорируется правильно)
+- middleware.ts:25: '静态 assets' → 'статичные assets' (китайский → русский)
+- README.md: полностью переписан (336 строк, профессиональная структура)
+
+## Новый README
+- Возможности (10 пунктов с эмодзи)
+- Технологии (таблица 14 строк)
+- Архитектура (диаграмма потока + дерево файлов)
+- Быстрый старт (5 шагов: clone → env → supabase → dev → deploy)
+- Биржи (таблица 6 бирж × 6 колонок)
+- Структура БД (9 строк)
+- Безопасность (10 пунктов)
+- Деплой (Vercel + регион fra1)
+- Тестирование (vitest + CI)
+- Roadmap (9 пунктов)
+---
+ .gitignore                   |   3 +-
+ README.md                    | 415 ++++++++++++++++++++++++-----------
+ app/api/debug/bingx/route.ts | 121 ----------
+ middleware.ts                |   2 +-
+ 4 files changed, 295 insertions(+), 246 deletions(-)
+ delete mode 100644 app/api/debug/bingx/route.ts
+
+diff --git a/.gitignore b/.gitignore
+index 78b885b..7ce7f55 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,4 +1,5 @@
+ node_modules
+ .next
+ .env.local
+-.env*.localtsconfig.tsbuildinfo
++.env*.local
++tsconfig.tsbuildinfo
+diff --git a/README.md b/README.md
+index 3dccd21..17608c9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,167 +1,336 @@
+ # Futures Tracker
+ 
+-Личный трекер фьючерсных сделок с Bybit и Bitunix: авто-синк по read-only API-ключам, список сделок, месячная сводка.
++Личный трекер фьючерсных сделок с автосинком через read-only API-ключи: **6 бирж** (Bybit, Binance, Bitget, Bitunix, BingX, MEXC), дашборд с PnL по месяцам, ручной учёт спот- и фьючерс-баланса, мультитенантная авторизация через Google и админка для управления пользователями. Next.js 16 + Supabase + Tailwind 4, деплой на Vercel.
++
++> 📺 **Демо:** `https://futures-tracker.vercel.app` _(замени на свой URL после деплоя)_
++>
++> 📷 **Скриншоты:**
++> ![Dashboard](https://placeholder svg/1200x700?text=Dashboard)
++> ![Trades](https://placeholder svg/1200x700?text=Trades+Table)
++> ![Admin](https://placeholder svg/1200x700?text=Admin+Panel)
++>
++> _Замени placeholder-ссылки на реальные скриншоты перед публикацией репозитория._
++
++---
++
++## ✨ Возможности
++
++- 🔄 **Автосинк 6 бирж** — Bybit, Binance, Bitget, Bitunix, BingX, MEXC. Каждая со своим адаптером подписи (HMAC-SHA256, SHA-512, base64), нарезкой окон и пагинацией.
++- 🔐 **Шифрование API-ключей** — AES-256-GCM, ключ шифрования только в env сервера, никогда в БД. Сохранение ключа предваряется live-проверкой `testCredentials` реальным запросом к бирже.
++- 📊 **Дашборд** — итоговый net PnL, win-rate, статистика выбранного месяца, кликабельный график PnL по месяцам, последние 5 сделок.
++- 💸 **Ручные сделки** — для старых или внебиржевых сделок. Заметки сохраняются по `blur` и не затираются ресинком.
++- 📈 **График баланса** — спот vs фьючерс, forward-fill, спред, линия цели. Только ручной ввод точек, режим «итог» или «дельта» (атомарный через RPC `apply_balance_delta`).
++- 🎛️ **Фильтр бирж** — включай/выключай отдельные биржи из PnL-расчётов, состояние в `localStorage`.
++- 🌗 **Светлая/тёмная/системная тема** — переключатель в шапке, без FOUC (скрипт применяет тему до первого рендера).
++- 👥 **Мультитенантность** — каждый юзер видит только свои данные (RLS на уровне БД), cron-синк обходит всех пользователей с изоляцией ошибок.
++- 🛡️ **Админка** — управление allowlist (БД + env fallback), таблица пользователей с PnL/подключениями, детальная страница пользователя.
++- 🔒 **Безопасность** — RLS на всех таблицах, `security_definer` RPC с проверкой `admin_emails`, timing-safe сравнение `CRON_SECRET`, zod-валидация всех входящих JSON.
++
++---
++
++## 🧱 Технологии
++
++| Слой | Технология |
++|---|---|
++| Фреймворк | **Next.js 16** (App Router, Server Components) |
++| Язык | **TypeScript 5** (strict) |
++| UI | **React 19**, **Tailwind CSS 4** (через `@tailwindcss/postcss`) |
++| Графики | **Recharts 2** |
++| БД / Auth | **Supabase** (Postgres, `@supabase/ssr`, Google OAuth) |
++| Валидация | **Zod 4** — все POST/PUT/PATCH тела парсятся через `safeParse` |
++| Шифрование | `crypto` (Node) — AES-256-GCM |
++| Тесты | **Vitest 5** |
++| Линт | **ESLint** + `eslint-config-next` |
++| CI | **GitHub Actions** — TypeScript → ESLint → Tests → Build |
++| Пакет-менеджер | **pnpm 12** |
++| Деплой | **Vercel** (cron-jobs, region `fra1`) |
++
++---
++
++## 🏗 Архитектура
++
++**Поток данных:**
+ 
+-## Запуск локально
++```
++BingX API ─┐
++Bybit API ─┼─→ fetchWithRetry (timeout, retry, backoff)
++Binance ───┤        ↓
++Bitget ────┤   adapter.fetchClosedTrades() → SyncedTrade[]
++Bitunix ───┤        ↓
++MEXC ──────┘   syncUserExchange() → upsert в trades (unique user_id,exchange,external_id)
++                       ↑
++                Vercel Cron (Bearer $CRON_SECRET) / ручной запуск юзера
++```
++
++**Слои:**
++
++- `lib/exchanges/*.ts` — адаптеры бирж. Каждый отвечает за подпись, маппинг в `SyncedTrade`, нарезку окон, пагинацию. Реестр в `lib/exchanges/index.ts`.
++- `lib/sync.ts` — `fetchWithRetry`, `getSyncTargets` (расшифровка ключей), `syncUserExchange` (цикл пагинации), `syncAllUsers` (изоляция ошибок между юзерами), `summarizeResults`.
++- `lib/auth.ts` — `authenticateSyncRequest`: cron-mode (timing-safe сравнение секрета) или user-mode (сессия Supabase).
++- `lib/admin.ts` — `requireAdmin()` для всех `/api/admin/*`: проверка `admin_emails` в БД + fallback на env `ADMIN_EMAILS`.
++- `lib/balance.ts` — расчёт исторического графика баланса (forward-fill spot/futures).
++- `lib/trade-model.ts` — чистые функции бизнес-логики (форматирование, статистика, группировка). Unit-тестируется.
++- `lib/validation.ts` — zod-схемы для всех API-роутов.
++- `lib/crypto.ts` — `encrypt`/`decrypt`/`maskKey` (AES-256-GCM, iv + authTag + ciphertext).
++- `middleware.ts` — проверка сессии Supabase + allowlist (БД + env) + admin-защита `/admin/*`.
++- `app/api/**` — route handlers. Тонкие: auth → validate → вызов lib-функции → JSON.
++- `supabase/migration_*.sql` — источник правды по схеме БД. `schema.sql` — устаревший v1-слепок, не использовать для новых инсталляций.
++
++**Структура каталогов:**
++
++```
++futures-tracker/
++├── app/
++│   ├── page.tsx                  # Дашборд (итог + фильтр + графики + последние сделки)
++│   ├── trades/page.tsx           # Таблица всех сделок, inline-редактирование заметок
++│   ├── manual/page.tsx           # Форма ручных сделок
++│   ├── balance/page.tsx          # Управление снапшотами spot/futures
++│   ├── connections/page.tsx      # Подключение бирж (api key/secret/passphrase)
++│   ├── admin/                    # Админка: allowlist + список пользователей + детали
++│   ├── login/                    # OAuth через Google
++│   ├── auth/callback/            # Обмен code на сессию (защита от open-redirect)
++│   ├── not-allowed/              # 403-страница для незнакомых email-ов
++│   └── api/
++│       ├── sync/[exchange]/      # Ручной синк одной биржи (user-mode или cron)
++│       ├── sync/cron/            # Cron-синк всех бирж всех юзеров
++│       ├── trades/               # CRUD сделок (заметки — всем; поля — только manual)
++│       ├── balance/              # Снапшоты баланса: absolute / delta (RPC)
++│       ├── balance/chart/        # Готовый dataset для графика
++│       ├── connections/          # CRUD подключений с валидацией ключа
++│       ├── goal/                 # Настройки user_settings
++│       └── admin/                # allowlist + users (RPC security_definer)
++├── components/
++│   ├── dashboard/                # PnLChart, MonthStats, SyncButton, ExchangeFilter, GraphTabs
++│   ├── ui/                       # StatCard, PnlValue, SkeletonCard, ChartTooltip
++│   ├── BalanceChart.tsx          # ComposedChart spot vs futures
++│   ├── ThemeProvider.tsx         # Context темы (light/dark/system)
++│   ├── ThemeToggle.tsx
++│   └── SignOutButton.tsx
++├── lib/
++│   ├── exchanges/                # 6 адаптеров + index + types
++│   ├── trade-model.ts            # Чистая бизнес-логика (.test.ts рядом)
++│   ├── sync.ts                   # fetchWithRetry + syncUserExchange + syncAllUsers
++│   ├── auth.ts                   # authenticateSyncRequest (cron / user)
++│   ├── admin.ts                  # requireAdmin
++│   ├── balance.ts                # getBalanceChartForUser
++│   ├── crypto.ts                 # AES-256-GCM
++│   ├── validation.ts             # zod-схемы
++│   ├── types.ts                  # Trade, SyncedTrade, BalanceChartPoint, UserSettings
++│   ├── supabase.ts               # service_role клиент (НИКОГДА не импортировать в браузер)
++│   ├── supabase-server.ts        # SSR-клиент с cookies
++│   └── supabase-browser.ts       # Браузерный клиент для OAuth
++├── middleware.ts                 # Auth + allowlist + admin-защита
++├── supabase/
++│   ├── schema.sql                # ⚠️ Устаревший v1-слепок. Используй миграции 02-09.
++│   ├── migration_02_rls.sql      # user_id + RLS на trades
++│   ├── migration_03_exchange_connections.sql
++│   ├── migration_04_new_exchanges.sql     # Binance/Bitget/BingX/MEXC + passphrase
++│   ├── migration_05_balance_tracking.sql  # balance_snapshots + user_settings
++│   ├── migration_06_admin_allowlist.sql   # allowed_emails + get_users_overview()
++│   ├── migration_06b_allowlist_rls_policies.sql
++│   ├── migration_07_admin_user_detail.sql # 3 RPC: by_id, stats, monthly
++│   ├── migration_08_admin_rls_protection.sql  # admin_emails + admin-check в RPC
++│   ├── migration_09_balance_delta_rpc.sql     # apply_balance_delta (atomic)
++│   └── admin_queries.sql         # Справочные SQL-запросы для админки
++├── .github/workflows/ci.yml      # TypeScript → ESLint → Vitest → Build
++├── eslint.config.mjs
++├── vitest.config.ts
++├── vercel.json                   # region: fra1 + cron /api/sync/cron ежедневно
++└── .env.example
++```
++
++---
++
++## 🚀 Быстрый старт
++
++### 1. Клонирование
+ 
+ ```bash
++git clone https://github.com/<твой-username>/futures-tracker.git
++cd futures-tracker
+ pnpm install
+-cp .env.example .env.local   # заполнить ключи
+-pnpm dev
+ ```
+ 
+-## Supabase
++### 2. Переменные окружения
+ 
+-1. Создать проект на supabase.com (бесплатный tier).
+-2. В SQL Editor выполнить `supabase/schema.sql`.
+-3. Взять `Project URL` и `service_role` ключ (Settings → API) → `.env.local`.
++```bash
++cp .env.example .env.local
++```
+ 
+-## Деплой (Vercel)
++Заполни `.env.local`:
+ 
+-1. Запушить проект в GitHub-репозиторий.
+-2. На vercel.com → **Add New → Project** → импортировать репозиторий (Vercel сам определит Next.js, никаких доп. настроек сборки не требуется).
+-3. В **Project Settings → Environment Variables** добавить все переменные из `.env.example`, включая `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`/`ALLOWED_EMAILS` — без них никто не сможет залогиниться (см. раздел про Google Auth ниже).
+-4. Deploy.
++| Переменная | Назначение |
++|---|---|
++| `SUPABASE_URL` | URL проекта Supabase (серверный доступ) |
++| `SUPABASE_SERVICE_ROLE_KEY` | service_role ключ — обходит RLS, только для API-роутов |
++| `NEXT_PUBLIC_SUPABASE_URL` | Тот же URL (для браузера/middleware) |
++| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Publishable (anon) ключ — НЕ secret |
++| `ALLOWED_EMAILS` | Email-ы через запятую, кому разрешён вход. Fallback к БД. |
++| `ADMIN_EMAILS` | Email-ы админов через запятую. Отдельный список от allowlist. |
++| `ENCRYPTION_KEY` | 32 байта base64 — для шифрования API-ключей бирж |
++| `CRON_SECRET` | Случайная строка — Vercel шлёт её в `Authorization: Bearer` при запуске cron |
++| `BITUNIX_SYMBOLS` | Список тикеров через запятую (опционально; пусто = все символы) |
+ 
+-`vercel.json` уже содержит cron-задачи на синк каждые 15 минут — они дёргают `/api/sync/bybit` и `/api/sync/bitunix` напрямую. Проверить, что крон подхватился — в панели проекта, вкладка **Settings → Cron Jobs**.
++Генерация ключей:
+ 
+-**Важно:** лимиты по частоте cron-джобов на бесплатном Hobby-плане Vercel периодически меняются. Перед деплоем стоит свериться с актуальными лимитами в Vercel Dashboard → Settings → Cron Jobs; если 15 минут окажутся недоступны на твоём плане, можно временно дергать те же роуты внешним крон-сервисом (cron-job.org) или просто кнопкой "Синк" в интерфейсе.
++```bash
++node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"  # ENCRYPTION_KEY
++node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"     # CRON_SECRET
++```
+ 
+-## Обновление уже задеплоенного проекта (миграция БД)
++### 3. Настройка Supabase
++
++1. Создай проект на [supabase.com](https://supabase.com) (free tier).
++2. **Authentication → Sign In / Providers → Google** — включи, вставь OAuth Client ID/Secret из Google Cloud Console.
++3. **Authentication → URL Configuration → Redirect URLs** — добавь:
++   - `http://localhost:3000/auth/callback` (для локалки)
++   - `https://<твой-домен>.vercel.app/auth/callback` (для прода)
++4. **SQL Editor** — выполни миграции **по порядку**:
++   ```sql
++   -- 1. Базовая схема (устаревший, но отправная точка):
++   --    supabase/schema.sql
++   -- 2. Затем по очереди:
++   supabase/migration_02_rls.sql
++   supabase/migration_03_exchange_connections.sql
++   supabase/migration_04_new_exchanges.sql
++   supabase/migration_05_balance_tracking.sql
++   supabase/migration_06_admin_allowlist.sql
++   supabase/migration_06b_allowlist_rls_policies.sql
++   supabase/migration_07_admin_user_detail.sql
++   supabase/migration_08_admin_rls_protection.sql
++   supabase/migration_09_balance_delta_rpc.sql
++   ```
++   ⚠️ В `migration_02_rls.sql` замени `<твой-email>@gmail.com` на свой перед выполнением шага 2 (backfill).
++5. После миграции 08 — добавь себя в админы:
++   ```sql
++   insert into admin_emails (email, note) values ('you@gmail.com', 'main admin');
++   insert into allowed_emails (email, note) values ('you@gmail.com', 'main admin');
++   ```
+ 
+-Если `schema.sql` уже был накатан раньше — в Supabase SQL Editor выполни:
++### 4. Локальный запуск
+ 
+-```sql
+-alter table trades drop constraint if exists trades_exchange_check;
+-alter table trades add constraint trades_exchange_check check (exchange in ('bybit', 'bitunix', 'manual'));
+-alter table trades add column if not exists notes text;
++```bash
++pnpm dev
++# Открой http://localhost:3000 → редирект на /login → Google OAuth
+ ```
+ 
+-## Регион Vercel-функций
++### 5. Деплой на Vercel
+ 
+-`vercel.json` закрепляет функции за Frankfurt (`fra1`) — Bybit блокирует API-запросы из США по регуляторным причинам, а Vercel Hobby по умолчанию использует `iad1` (US East). Если увидишь ошибку вида `CloudFront distribution is configured to block access from your country` — проверь, что регион в `vercel.json` не сброшен обратно на дефолтный.
++1. Запушь репозиторий в GitHub.
++2. [vercel.com](https://vercel.com) → **Add New → Project** → импортируй репозиторий (Vercel сам определит Next.js).
++3. **Project Settings → Environment Variables** — добавь все переменные из `.env.example`.
++4. **Deploy**. Cron-задача `/api/sync/cron` подхватится из `vercel.json` (ежедневно в 00:00 UTC).
+ 
+-## Backfill истории Bybit
++---
+ 
+-`/v5/position/closed-pnl` у Bybit жёстко ограничен диапазоном `endTime - startTime <= 7 дней`, а без явных `startTime`/`endTime` отдаёт вообще только последние 24 часа. Поэтому `/api/sync/bybit` сам нарезает период на 7-дневные окна.
++## 📊 Поддерживаемые биржи
+ 
+-По умолчанию синкается год назад (`days=365`). Чтобы забрать более глубокую историю разово — дёрни вручную (например, через браузер, пока залогинен через Google):
+-```
+-https://твой-домен.vercel.app/api/sync/bybit?days=730
+-```
+-Дубли не создаются — таблица использует `unique(exchange, external_id)` и upsert.
++| Биржа | Эндпоинт | Подпись | Окна | Пагинация | Особенности |
++|---|---|---|---|---|---|
++| **Bybit** | `/v5/position/closed-pnl` (V5, linear) | HMAC-SHA256 (hex) | 7 дней | cursor | `closedPnl` уже включает fee; side инвертирован (закрывающий ордер) |
++| **Binance** | `/fapi/v1/income` + `/fapi/v1/userTrades` | HMAC-SHA256 (hex) | 7 дней | `fromId` | PnL/fee/funding — три отдельных запроса; матчинг по `orderId` |
++| **Bitget** | `/api/v2/mix/position/history-position` | HMAC-SHA256 (base64) + passphrase | нет | `idLess` | Timestamp с сервера Bitget (защита от рассинхрона) |
++| **Bitunix** | `/api/v1/futures/position/get_history_positions` | Двойной SHA-256 с nonce | нет | `skip/limit` | Агрегация partials по `positionId`; символы из env `BITUNIX_SYMBOLS` |
++| **BingX** | `/openApi/swap/v2/user/income` | HMAC-SHA256 (hex) | 7 дней | по времени | income endpoint (не positionHistory — тот пустой у части аккаунтов); группировка по `tradeId` |
++| **MEXC** | `/api/v1/private/position/list/history-position` | HMAC-SHA256 (hex) | нет | `pageNum/pageSize` | Готовые `fee`, `fundingAmount`, `realizedAmount` |
+ 
+-## Ручные сделки и заметки
++Все адаптеры реализуют интерфейс `ExchangeAdapter` (см. `lib/exchanges/types.ts`) и регистрируются в `lib/exchanges/index.ts`. Для добавления новой биржи:
+ 
+-- Вкладка **"Добавить сделку"** — форма для сделок, которые не пришли по API (старые сделки, сделки без ключей и т.д.). Хранятся как `exchange = 'manual'`, их можно удалять — синканные с биржи сделки удалить нельзя (появятся заново на следующем синке).
+-- В таблице **"Сделки"** у каждой строки (включая синканные) есть редактируемое поле **"Заметки"** — сохраняется по blur, при следующем синке не перезатирается (upsert обновляет только те колонки, которые реально передаются в запросе, `notes` туда не входит).
++1. Создай `lib/exchanges/<name>.ts` с реализацией `fetchClosedTrades` + `testCredentials`.
++2. Добавь идентификатор в `EXCHANGES` (index.ts) и в `Exchange` union (types.ts).
++3. Зарегистрируй адаптер в `REGISTRY`.
++4. Расширь CHECK constraint в БД (новая миграция).
+ 
++---
+ 
+-- **Bybit**: `/v5/position/closed-pnl`, категория `linear` (USDT-перпетуалы). Подпись — стандартный HMAC-SHA256. `closedPnl` в ответе уже учитывает комиссию, поэтому `fee` в БД пишется как 0, чтобы не задваивать вычет — если увидишь расхождение с реальным балансом, можно поправить в `lib/exchanges/bybit.ts`.
+-- **Bitunix**: `/api/v1/futures/position/get_history_positions`. Подпись своя (двойной SHA-256 с nonce), детали в `lib/exchanges/bitunix.ts`. Если API требует `symbol` обязательным параметром — список тикеров задаётся через `BITUNIX_SYMBOLS` в `.env`.
+-- **Binance**: `/fapi/v1/income` (REALIZED_PNL/COMMISSION/FUNDING_FEE) + `/fapi/v1/userTrades`. Подпись — HMAC-SHA256. PnL не включает комиссию, поэтому `fee` тянется отдельным запросом.
+-- **Bitget**: `/api/v2/mix/position/history-position`, productType=USDT-FUTURES. Подпись HMAC-SHA256 с base64 (как у OKX), требует **passphrase** — третье поле в форме подключения. Timestamp берётся с сервера Bitget.
+-- **BingX**: `/openApi/swap/v2/user/positions/history`. Подпись HMAC-SHA256 (как Binance). Пагинация по pageNum/pageSize. Возвращает готовые fee, fundingFee, realizedPNL.
+-- **MEXC**: `/api/v1/private/position/list/history-position`. Подпись HMAC-SHA256. Пагинация по pageNum/pageSize. positionType: 1=Long, 2=Short.
+-- Все клиенты писались по официальной документации на момент создания проекта (июль 2026) — перед боевым использованием стоит прогнать один тестовый синк и свериться вручную с 2-3 сделками, т.к. биржи периодически меняют формат ответов.
++## 🗄 Структура БД
+ 
+-## Авторизация через Google (шаг 1 из плана мультитенантности)
++| Таблица | Назначение |
++|---|---|
++| `trades` | Все сделки (синканные и ручные). `unique(user_id, exchange, external_id)` для идемпотентного upsert. |
++| `exchange_connections` | Подключения бирж юзеров. `api_key_encrypted`, `api_secret_encrypted`, `passphrase_encrypted` (для Bitget). |
++| `balance_snapshots` | Ручные точки баланса (spot/futures). `unique(user_id, type, snapshot_date)`. |
++| `user_settings` | `goal_usd` (линия цели на графике) и `futures_start_usd` (legacy, не используется). |
++| `allowed_emails` | Allowlist входа. Управляется через `/admin` или env `ALLOWED_EMAILS`. |
++| `admin_emails` | Список админов. Проверяется в `security_definer` RPC + env `ADMIN_EMAILS`. |
++| `monthly_summary` (view) | Агрегаты по месяцам с `security_invoker = true` (RLS-aware). |
++| `get_users_overview()` | RPC: все юзеры с подключениями + статистикой (admin-only). |
++| `get_user_by_id()` / `get_user_trades_stats()` / `get_user_monthly_summary()` | RPC детальной страницы юзера в админке (admin-only). |
++| `apply_balance_delta()` | Атомарный delta-upsert баланса через `SELECT FOR SHARE` (защита от race condition). |
+ 
+-Basic Auth заменён на настоящий логин через Supabase Auth + Google. Пока это **не полноценная мультитенантность** — все пользователи из `ALLOWED_EMAILS` видят одни и те же данные (таблица `trades` пока без `user_id`). Это нужно для следующего шага, чтобы не переделывать всё разом.
++---
+ 
+-**Настройка:**
++## 🔐 Безопасность
+ 
+-1. **Google Cloud Console** → создать OAuth 2.0 Client ID (тип "Web application").
+-   - Authorized redirect URI: `https://<project-id>.supabase.co/auth/v1/callback`
+-   - Сохранить Client ID и Client Secret.
+-2. **Supabase Dashboard** → Authentication → Sign In / Providers → Google → включить, вставить Client ID/Secret из шага 1.
+-3. **Supabase Dashboard** → Authentication → URL Configuration → добавить в Redirect URLs:
+-   - `http://localhost:3000/auth/callback` (для локальной разработки)
+-   - `https://твой-домен.vercel.app/auth/callback` (для продакшена)
+-4. В `.env.local` / Vercel env добавить:
+-   - `NEXT_PUBLIC_SUPABASE_URL` — тот же URL, что и `SUPABASE_URL`
+-   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — берётся в Settings → API Keys → **Publishable key** (НЕ secret!)
+-   - `ALLOWED_EMAILS` — твой email через запятую (если несколько человек — все через запятую). **Не оставляй пустым в продакшене**, иначе войти сможет кто угодно с Google-аккаунтом.
+-5. `pnpm install` (подтянет `@supabase/ssr`), `pnpm dev`, проверить `/login`.
++- **Row Level Security** на всех таблицах с пользовательскими данными. Даже баг в коде не позволит прочитать чужие сделки — Postgres сам откажет.
++- **`security_definer` RPC с admin-чеком** — `get_users_overview`, `get_user_by_id` и др. проверяют `admin_emails` в CTE; не-админу возвращают пустой результат.
++- **AES-256-GCM шифрование** API-ключей. IV (12 байт) + authTag (16 байт) + ciphertext, всё в одной base64-строке. Ключ — только в env сервера, никогда в БД.
++- **Zod-валидация** всех POST/PUT/PATCH тел через `safeParse`. Невалидный запрос → 400 с конкретными ошибками полей.
++- **Timing-safe сравнение** `CRON_SECRET` через `crypto.timingSafeEqual` (lib/auth.ts) — защита от атак по времени.
++- **Защита от open-redirect** в `/auth/callback` — `safeNext()` пропускает только относительные пути без `//` и `://`.
++- **Fail-closed allowlist** — если email не найден ни в БД, ни в env, доступ запрещён. Пустой allowlist никого не пускает.
++- **Masked key preview** — в БД хранится `key_preview` вида `•••• 4811`, никогда полный ключ. API никогда не отдаёт `*_encrypted` колонки наружу.
++- **Defensive coding** — везде, где RLS уже защищает, route handler дублирует фильтр `eq("user_id", user.id)`. Если в RLS появится баг, фильтр в коде подстрахует.
++- **Read-only API-ключи** — форма подключения явно предупреждает: ключи бирж должны быть только на чтение истории сделок.
+ 
+-## Шаг 2: RLS + user_id (мультитенантность на уровне БД)
++---
+ 
+-Теперь каждая сделка привязана к конкретному пользователю (`user_id`), и Postgres Row Level Security физически не даёт прочитать/изменить чужие сделки — даже если в коде где-то будет баг, база сама откажет в доступе.
++## 🌍 Деплой
+ 
+-**Порядок действий (важно соблюдать именно так):**
++### Vercel
+ 
+-1. Убедись, что уже хотя бы раз залогинился через Google на сайте (после шага 1) — иначе некому будет привязать существующие сделки.
+-2. Открой `supabase/migration_02_rls.sql`, в шаге 2 (`update trades set user_id = ...`) замени email в кавычках на свой (тот, которым логинишься через Google).
+-3. Выполни миграцию в Supabase SQL Editor **по частям**: сначала шаги 1-3 (добавление колонки, backfill, проверка), глянь результат `select count(*) ...` — если 0, дальше можно выполнять шаги 4-7 целиком. Если не 0 — где-то разошёлся email, не выполняй `alter column ... set not null`, пока не поправишь.
+-4. В Supabase Dashboard → Authentication → Users найди свою запись, скопируй значение из колонки **UID** (это `auth.users.id`).
+-5. Добавь в `.env.local` и в Vercel env:
+-   ```
+-   SYNC_USER_ID=<скопированный UID>
+-   ```
+-   **С шагом 4 (мультитенантный синк) эта переменная больше не используется** — cron сам обходит все `exchange_connections`. Можно не заполнять, оставлено только для совместимости со старыми деплоями.
+-6. Перезапусти `pnpm dev` (или редеплой на Vercel), проверь, что дашборд и синк работают как раньше.
++1. Импортируй репозиторий на [vercel.com](https://vercel.com).
++2. Environment Variables — добавь все из `.env.example`.
++3. `vercel.json` уже сконфигурирован:
++   - `regions: ["fra1"]` — Frankfurt (Bybit/Binance блокируют US-регион).
++   - `crons: [{ path: "/api/sync/cron", schedule: "0 0 * * *" }]` — ежедневный синк всех бирж всех юзеров в 00:00 UTC.
++4. Cron использует `Authorization: Bearer $CRON_SECRET` — Vercel автоматически подставляет переменную.
+ 
+-## Шаг 3: пользовательские API-ключи бирж
++### Регион
+ 
+-Ключи Bybit/Bitunix больше не лежат в env — вводятся через UI (страница **"Подключения"**), проверяются реальным запросом к бирже перед сохранением, и хранятся в БД зашифрованными (AES-256-GCM, ключ шифрования — только в env сервера, никогда в БД).
++`fra1` обязателен — Bybit и Binance блокируют API-запросы из US-региона (Vercel Hobby по умолчанию использует `iad1`). Если увидишь `CloudFront distribution is configured to block access from your country` — проверь, что регион не сбросился.
+ 
+-**Настройка:**
++### Лимиты Vercel Hobby
+ 
+-1. Сгенерируй ключ шифрования:
+-   ```
+-   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+-   ```
+-2. Добавь в `.env.local` и в Vercel env:
+-   ```
+-   ENCRYPTION_KEY=<результат команды выше>
+-   ```
+-   **Не теряй этот ключ** и не меняй его, когда уже сохранил подключения — без него зашифрованные ключи бирж не расшифровать, придётся переподключать биржи заново.
+-3. В Supabase SQL Editor выполни `supabase/migration_03_exchange_connections.sql`.
+-4. `BYBIT_API_KEY`/`BYBIT_API_SECRET`/`BITUNIX_API_KEY`/`BITUNIX_API_SECRET` можно убрать из env — больше не используются (`BITUNIX_SYMBOLS` пока остаётся в env, список символов общий для всех пользователей — это шаг 5 дорожной карты).
+-5. `pnpm dev`, зайди на `/connections`, подключи Bybit и Bitunix заново (те же ключи, что были в env) — форма сама проверит их перед сохранением.
+-6. Нажми "Синк" на дашборде — теперь ключи читаются из БД.
++- Cron: 2 задачи на free-плане. У нас одна (`/api/sync/cron`).
++- Function duration: 60 сек (`maxDuration = 60` в sync-роутах). При росте числа юзеров этого не хватит — нужен переход на QStash/Supabase Queue (см. Roadmap).
+ 
+-## Дорожная карта до полноценного мультитенантного SaaS
++---
+ 
+-1. ✅ Google Auth — вход настоящий, allowlist по email.
+-2. ✅ RLS + `user_id` — данные физически изолированы на уровне БД.
+-3. ✅ Пользовательские API-ключи бирж — форма подключения, шифрование в БД, валидация перед сохранением.
+-4. ✅ **Синк по всем пользователям** — cron-роуты обходят все строки `exchange_connections` и синкают каждого пользователя отдельно. Ошибки изолированы: если у одного ключ стал невалидным, остальные всё равно просинкаются. `SYNC_USER_ID` больше не нужен.
++## 🧪 Тестирование
+ 
+-### Что дальше (шаг 5+)
++```bash
++pnpm test          # один прогон (vitest run)
++pnpm test:watch    # watch-режим
++```
+ 
+-- **Per-user символы Bitunix** — сейчас `BITUNIX_SYMBOLS` общий для всех из env. Если у разных юзеров разные торгуемые пары, нужно хранить их в `exchange_connections`.
+-- **Очередь синка** — при росте числа пользователей 60-секундного лимита Vercel function не хватит на последовательный синк. Перенести в Supabase Queue или QStash с параллельной обработкой.
+-- **`last_synced_at`** в `exchange_connections` — чтобы не тянуть 365 дней каждый раз, а синкать только дельту с прошлого запуска.
+-- **Мониторинг** — алерт в Telegram/email если cron-синк упал 3 раза подряд.
++Покрытие:
+ 
+-## Структура
++- `lib/trade-model.test.ts` — чистая бизнес-логика: `tradeNetPnl`, `calculateMonthStats`, `calculateAllTimeWinRate`, `calculateTotalNetPnl`, `groupTradesByMonth`, `getActiveMonth`, форматирование (`fmt`, `fmtPnl`, `fmtFee`, `fmtDate`).
+ 
+-```
+-app/
+-  page.tsx            — дашборд (сводка + график по месяцам)
+-  trades/page.tsx      — таблица сделок с фильтром по бирже
+-  manual/page.tsx      — форма добавления сделок вручную
+-  connections/page.tsx  — управление подключениями к биржам
+-  login/page.tsx        — страница входа (Google)
+-  auth/callback/        — обмен OAuth-кода на сессию Supabase
+-  api/sync/bybit/      — синк с Bybit
+-  api/sync/bitunix/    — синк с Bitunix
+-  api/trades/          — чтение/создание сделок + месячной сводки
+-  api/trades/[id]/      — редактирование заметок, удаление ручных сделок
+-  api/connections/      — список/добавление подключений к биржам
+-  api/connections/[exchange]/ — отключение биржи
+-lib/
+-  exchanges/           — клиенты бирж (подпись + маппинг в общий формат Trade)
+-  supabase.ts          — server-side клиент Supabase (service_role, для синка)
+-  supabase-browser.ts   — Supabase-клиент для браузера (Auth)
+-  supabase-server.ts    — Supabase-клиент для Server Components/route handlers (Auth)
+-  crypto.ts             — AES-256-GCM шифрование ключей бирж
+-  types.ts             — общие типы
+-components/SignOutButton.tsx — кнопка выхода из аккаунта
+-supabase/schema.sql     — таблица trades + вьюха monthly_summary
+-supabase/migration_02_rls.sql — миграция: user_id + RLS
+-supabase/migration_03_exchange_connections.sql — миграция: таблица подключений к биржам
+-middleware.ts           — проверка сессии Supabase Auth (Google) + allowlist по email
+-vercel.json              — конфиг cron-задач на автосинк
+-```
++CI (`.github/workflows/ci.yml`) прогоняет на каждом push/PR в `main`:
++
++1. `npx tsc --noEmit` — typecheck
++2. `pnpm lint` — ESLint
++3. `pnpm test` — Vitest
++4. `pnpm build` — production-сборка с fake env-переменными
++
++---
++
++## 📝 Лицензия
++
++[MIT](LICENSE) © 2026
++
++---
++
++## 🗺 Roadmap
++
++- [ ] **Per-user символы Bitunix** — хранить список тикеров в `exchange_connections` вместо общего env `BITUNIX_SYMBOLS`.
++- [ ] **`last_synced_at`** — delta-синк только новых сделок с прошлого запуска, а не 365 дней каждый раз.
++- [ ] **Очередь синка** — переход на QStash/Supabase Queue при росте числа юзеров свыше лимита 60 сек.
++- [ ] **Мониторинг** — алерт в Telegram/email, если cron-синк упал 3 раза подряд.
++- [ ] **По-bitunix-fills детализация** — UI-режим «позиция закрыта в N partials» с разворачиванием.
++- [ ] **Bybit fee через `/v5/account/transaction-log`** — сейчас `fee=0` (closedPnl уже включает комиссию), но для расчёта баланса нужна раздельная статистика.
++- [ ] **OKX / KuCoin / Coinbase Advanced Trade** — типы `CredentialsSchema` уже подготовлены (`key+secret+passphrase`, `key+privatekey`).
++- [ ] **Экспорт CSV / интеграция с Google Sheets** — для бухгалтерии и налогов.
++- [ ] **PWA** — оффлайн-кеш дашборда, push-уведомления о крупных PnL.
+diff --git a/app/api/debug/bingx/route.ts b/app/api/debug/bingx/route.ts
+deleted file mode 100644
+index eabdf22..0000000
+--- a/app/api/debug/bingx/route.ts
++++ /dev/null
+@@ -1,121 +0,0 @@
+-import { NextResponse } from "next/server";
+-import { getSupabaseServerClient } from "@/lib/supabase";
+-import { createServerSupabaseClient } from "@/lib/supabase-server";
+-import { decrypt } from "@/lib/crypto";
+-import crypto from "crypto";
+-
+-/**
+- * ВРЕМЕННЫЙ debug-эндпоинт для диагностики BingX API.
+- *
+- * Делает ОДИН запрос к /openApi/swap/v1/trade/positionHistory и возвращает
+- * СЫРОЙ JSON ответ от BingX — без парсинга. Это покажет реальную структуру
+- * ответа, чтобы понять, почему сделки не парсятся.
+- *
+- * Доступ: любой залогиненный пользователь (для своего BingX подключения).
+- * УДАЛИТЬ после диагностики — не должен быть в продакшене.
+- */
+-export async function GET() {
+-  try {
+-    const supabase = await createServerSupabaseClient();
+-    const {
+-      data: { user },
+-    } = await supabase.auth.getUser();
+-    if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+-
+-    // Читаем BingX подключение текущего юзера
+-    const serviceSupabase = getSupabaseServerClient();
+-    const { data: connection, error: connError } = await serviceSupabase
+-      .from("exchange_connections")
+-      .select("api_key_encrypted, api_secret_encrypted")
+-      .eq("user_id", user.id)
+-      .eq("exchange", "bingx")
+-      .maybeSingle();
+-
+-    if (connError) throw connError;
+-    if (!connection) {
+-      return NextResponse.json({ error: "BingX не подключён" }, { status: 400 });
+-    }
+-
+-    const apiKey = decrypt(connection.api_key_encrypted);
+-    const apiSecret = decrypt(connection.api_secret_encrypted);
+-
+-    const now = Date.now();
+-    const threeMonthsAgo = now - 90 * 24 * 60 * 60 * 1000;
+-
+-    // === Запрос 1: positionHistory для BTC-USDT ===
+-    const positionParams: Record<string, string> = {
+-      symbol: "BTC-USDT",
+-      startTs: String(threeMonthsAgo),
+-      endTs: String(now),
+-      pageIndex: "1",
+-      pageSize: "10",
+-      timestamp: String(now),
+-      recvWindow: "5000",
+-    };
+-    const positionQs = Object.keys(positionParams)
+-      .sort()
+-      .map((k) => `${k}=${positionParams[k]}`)
+-      .join("&");
+-    const positionSig = crypto.createHmac("sha256", apiSecret).update(positionQs).digest("hex");
+-    const positionUrl = `https://open-api.bingx.com/openApi/swap/v1/trade/positionHistory?${positionQs}&signature=${positionSig}`;
+-
+-    const positionRes = await fetch(positionUrl, {
+-      method: "GET",
+-      headers: { "X-BX-APIKEY": apiKey, "X-SOURCE-KEY": "BX-AI-SKILL" },
+-    });
+-    const positionText = await positionRes.text();
+-    let positionJson: unknown;
+-    try {
+-      positionJson = JSON.parse(positionText);
+-    } catch {
+-      positionJson = { parseError: "not JSON", raw: positionText.slice(0, 500) };
+-    }
+-
+-    // === Запрос 2: income endpoint — показывает ВСЕ доходы (PnL, фандинг, комиссии) ===
+-    // НЕ требует symbol — возвращает всё за период
+-    const incomeParams: Record<string, string> = {
+-      startTime: String(threeMonthsAgo),
+-      endTime: String(now),
+-      limit: "50",
+-      timestamp: String(now),
+-      recvWindow: "5000",
+-    };
+-    const incomeQs = Object.keys(incomeParams)
+-      .sort()
+-      .map((k) => `${k}=${incomeParams[k]}`)
+-      .join("&");
+-    const incomeSig = crypto.createHmac("sha256", apiSecret).update(incomeQs).digest("hex");
+-    const incomeUrl = `https://open-api.bingx.com/openApi/swap/v2/user/income?${incomeQs}&signature=${incomeSig}`;
+-
+-    const incomeRes = await fetch(incomeUrl, {
+-      method: "GET",
+-      headers: { "X-BX-APIKEY": apiKey, "X-SOURCE-KEY": "BX-AI-SKILL" },
+-    });
+-    const incomeText = await incomeRes.text();
+-    let incomeJson: unknown;
+-    try {
+-      incomeJson = JSON.parse(incomeText);
+-    } catch {
+-      incomeJson = { parseError: "not JSON", raw: incomeText.slice(0, 500) };
+-    }
+-
+-    return NextResponse.json({
+-      positionHistory: {
+-        url: positionUrl,
+-        status: positionRes.status,
+-        body: positionJson,
+-      },
+-      income: {
+-        url: incomeUrl,
+-        status: incomeRes.status,
+-        body: incomeJson,
+-      },
+-    });
+-  } catch (err) {
+-    return NextResponse.json(
+-      { error: err instanceof Error ? err.message : String(err) },
+-      { status: 500 }
+-    );
+-  }
+-}
+-
+diff --git a/middleware.ts b/middleware.ts
+index 5e3ee1d..031e7e0 100644
+--- a/middleware.ts
++++ b/middleware.ts
+@@ -22,7 +22,7 @@ const envAdminEmails = (process.env.ADMIN_EMAILS ?? "")
+ const CRON_PATH = "/api/sync/cron";
+ 
+ export async function middleware(request: NextRequest) {
+-  // Публичные пути — логин, OAuth callback, страница отказа,静态 assets.
++  // Публичные пути — логин, OAuth callback, страница отказа, статичные assets.
+   const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error", "/not-allowed"];
+   if (publicPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
+     return NextResponse.next();
+-- 
+2.47.3
+
