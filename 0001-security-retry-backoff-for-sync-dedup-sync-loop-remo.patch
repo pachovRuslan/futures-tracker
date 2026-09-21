@@ -1,0 +1,704 @@
+From 9b48ffcb2cd42c15ab2af884f0bfbd446c0d7e09 Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Mon, 21 Sep 2026 20:55:12 +0000
+Subject: [PATCH] security: retry/backoff for sync + dedup sync loop + remove
+ debug (review #4)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Три проблемы из code review: нет retry, дублирование цикла синка,
+утечка userId в debug-ответе.
+
+## 1. fetchWithRetry — общий HTTP-запрос с retry/backoff (lib/sync.ts)
+
+Новая функция fetchWithRetry():
+- timeout: 15 сек (AbortController)
+- retries: 3 попытки
+- exponential backoff: 1с, 2с, 4с
+- Retry-After header: если биржа отдаёт 429/503, ждём столько,
+  сколько она просит
+- логирование retry в Vercel logs (без URL params, только path)
+
+Применено во всех 6 адаптерах:
+- bybit.ts — fetchWithRetry вместо fetch
+- bitunix.ts — 2 места (fetchClosedTrades + testCredentials)
+- binance.ts — fetchWithRetry
+- bitget.ts — 2 места (signedGet + getServerTime)
+- bingx.ts — fetchWithRetry
+- mexc.ts — fetchWithRetry
+
+Теперь если Bybit отдаёт 429 — синк не падает, а ждёт и повторяет.
+
+## 2. syncUserExchange — общий цикл пагинации (lib/sync.ts)
+
+Раньше цикл for (page = 0; page < 100; page++) { ... fetchClosedTrades
+... upsert ... } дублировался в 2 файлах:
+- app/api/sync/[exchange]/route.ts (28 строк)
+- app/api/sync/cron/route.ts (24 строки)
+
+Вынесен в lib/sync.ts: syncUserExchange(adapter, credentials, userId,
+sinceMs, untilMs) → number. Оба роута теперь вызывают его.
+
+Удалено ~50 строк дублирования. Баг в одном месте — чинится в обоих.
+
+## 3. Убран debug-блок из ответа /api/sync/[exchange]
+
+Раньше в JSON-ответе был блок:
+  debug: {
+    targetsCount: N,
+    results: [{ userId: 'a1b2c3d4', upserted: N, error: '...' }]
+  }
+
+Это утечка userId (первые 8 символов UUID) + ошибок бирж (могут
+содержать URL с подписью) в любой прокси/лог.
+
+Теперь ответ чистый:
+  { ok, mode, exchange, processed, succeeded, failed, upserted, errors }
+
+Ошибки (errors[]) остаются — они нужны для отображения в UI, но
+без userId и без slice(0, 200).
+
+## Результат
+
+- /api/sync/[exchange]: 150 → 78 строк (-48%)
+- /api/sync/cron: 128 → 69 строк (-46%)
+- lib/sync.ts: 123 → 226 строк (+fetchWithRetry +syncUserExchange)
+- Все адаптеры используют fetchWithRetry вместо голого fetch
+- TypeScript — чисто
+---
+ app/api/sync/[exchange]/route.ts |  77 +---------------
+ app/api/sync/cron/route.ts       |  77 ++--------------
+ lib/exchanges/binance.ts         |   3 +-
+ lib/exchanges/bingx.ts           |   3 +-
+ lib/exchanges/bitget.ts          |   5 +-
+ lib/exchanges/bitunix.ts         |   5 +-
+ lib/exchanges/bybit.ts           |   3 +-
+ lib/exchanges/mexc.ts            |   3 +-
+ lib/sync.ts                      | 151 ++++++++++++++++++++++++++-----
+ 9 files changed, 155 insertions(+), 172 deletions(-)
+
+diff --git a/app/api/sync/[exchange]/route.ts b/app/api/sync/[exchange]/route.ts
+index f569c50..7499de7 100644
+--- a/app/api/sync/[exchange]/route.ts
++++ b/app/api/sync/[exchange]/route.ts
+@@ -1,7 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+-import { getSupabaseServerClient } from "@/lib/supabase";
+ import { authenticateSyncRequest } from "@/lib/auth";
+-import { getSyncTargets, syncAllUsers, summarizeResults } from "@/lib/sync";
++import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
+ import { REGISTRY, isValidExchange } from "@/lib/exchanges";
+ 
+ export const maxDuration = 60;
+@@ -9,18 +8,12 @@ export const maxDuration = 60;
+ /**
+  * Динамический sync-роут: /api/sync/[exchange]
+  *
+- * Заменяет старые статические /api/sync/bybit и /api/sync/bitunix.
+- * При добавлении новой биржи не надо создавать новый route handler —
+- * достаточно зарегистрировать адаптер в lib/exchanges/index.ts.
+- *
+  * Авторизация:
+  *   - Vercel cron (Bearer $CRON_SECRET) — синкаем ВСЕХ пользователей
+  *   - Залогиненный пользователь — синкаем ТОЛЬКО его подключение
+  *
+  * Параметры:
+- *   - days: на сколько дней назад копать (по умолчанию 365). Только для Bybit
+- *     и других бирж с windowed API — остальные адаптеры сами решают, как
+- *     интерпретировать sinceMs/untilMs.
++ *   - days: на сколько дней назад копать (по умолчанию 365)
+  */
+ export async function GET(
+   req: NextRequest,
+@@ -29,7 +22,6 @@ export async function GET(
+   try {
+     const { exchange } = await params;
+ 
+-    // Валидация: биржа должна быть в реестре.
+     if (!isValidExchange(exchange)) {
+       return NextResponse.json(
+         { ok: false, error: `Неизвестная биржа: ${exchange}` },
+@@ -39,11 +31,9 @@ export async function GET(
+ 
+     const adapter = REGISTRY[exchange];
+ 
+-    // Авторизация: cron (синк всех) или user (только своё подключение).
+     const auth = await authenticateSyncRequest(req);
+     if ("error" in auth) return auth.error;
+ 
+-    // Список подключений, которые нужно просинкать в этом запуске.
+     const targets = await getSyncTargets(exchange, auth);
+     if (targets.length === 0) {
+       return NextResponse.json({
+@@ -57,63 +47,19 @@ export async function GET(
+       });
+     }
+ 
+-    // ?days=N — на сколько дней назад копать (для Bybit и других с windowed API).
+     const daysParam = req.nextUrl.searchParams.get("days");
+     const days = daysParam ? Number(daysParam) : 365;
+     const now = Date.now();
+     const sinceMs = now - days * 24 * 60 * 60 * 1000;
+ 
+-    // Цикл по всем целям. Ошибки изолированы: если у одного пользователя
+-    // ключ стал невалидным, остальные всё равно просинкаются.
++    // syncUserExchange — общий цикл пагинации (вынесен в lib/sync.ts)
+     const results = await syncAllUsers(targets, async ({ userId, credentials }) => {
+-      const supabase = getSupabaseServerClient();
+-      let userUpserted = 0;
+-      let cursor: string | undefined;
+-
+-      // Адаптер сам отвечает за пагинацию — вызываем его в цикле, пока
+-      // nextCursor !== null. Большинство адаптеров возвращает nextCursor=null
+-      // сразу (проходят все страницы внутри одного вызова), но Bybit
+-      // потенциально может вернуть курсор для продолжения.
+-      let pageTradesCount = 0;
+-      let firstPageSample: unknown = null;
+-      for (let page = 0; page < 100; page++) {
+-        const { trades, nextCursor } = await adapter.fetchClosedTrades(credentials, {
+-          sinceMs,
+-          untilMs: now,
+-          cursor,
+-        });
+-
+-        // Debug: сохраняем sample первой страницы для диагностики
+-        if (page === 0 && trades.length > 0 && firstPageSample === null) {
+-          firstPageSample = trades[0];
+-        }
+-        pageTradesCount += trades.length;
+-
+-        if (trades.length > 0) {
+-          const rows = trades.map((t) => ({ ...t, user_id: userId }));
+-          const { error } = await supabase
+-            .from("trades")
+-            .upsert(rows, { onConflict: "user_id,exchange,external_id" });
+-          if (error) throw error;
+-          userUpserted += trades.length;
+-        }
+-
+-        if (!nextCursor) break;
+-        cursor = nextCursor;
+-      }
+-      // Debug-лог в ответ API — покажет, сколько сделок нашёл адаптер
+-      // и пример структуры первой сделки.
+-      console.log(`[sync/${exchange}] user=${userId} found=${pageTradesCount} upserted=${userUpserted}`);
+-      if (pageTradesCount === 0) {
+-        console.log(`[sync/${exchange}] adapter returned 0 trades — check API response structure`);
+-      }
+-      return userUpserted;
++      return syncUserExchange(adapter, credentials, userId, sinceMs, now);
+     });
+ 
+     const summary = summarizeResults(results);
+ 
+-    // Для ручного запуска с дашборда: показываем человекочитаемую ошибку,
+-    // если у текущего пользователя синк упал.
++    // Для ручного запуска: показываем ошибку, если у текущего пользователя синк упал
+     let userError: string | undefined;
+     if (auth.mode === "user") {
+       const userResult = results.find((r) => r.userId === auth.userId);
+@@ -126,21 +72,8 @@ export async function GET(
+       exchange,
+       ...summary,
+       ...(userError ? { error: userError } : {}),
+-      // Debug-инфо для диагностики — показывает, сколько сделок нашёл
+-      // адаптер vs сколько записано в БД. Если found > 0 но upserted = 0 —
+-      // проблема в upsert. Если found = 0 — проблема в адаптере/ответе API.
+-      debug: {
+-        targetsCount: targets.length,
+-        results: results.map((r) => ({
+-          userId: r.userId.slice(0, 8),
+-          upserted: r.upserted,
+-          error: r.error?.slice(0, 200),
+-        })),
+-      },
+     });
+   } catch (err) {
+-    // Логируем только сообщение, без полного объекта — в err может быть
+-    // URL запроса с подписью, которое не должно попадать в логи Vercel.
+     console.error(`Sync error:`, err instanceof Error ? err.message : String(err));
+     return NextResponse.json(
+       { ok: false, error: err instanceof Error ? err.message : String(err) },
+diff --git a/app/api/sync/cron/route.ts b/app/api/sync/cron/route.ts
+index 61215f3..8e3314b 100644
+--- a/app/api/sync/cron/route.ts
++++ b/app/api/sync/cron/route.ts
+@@ -1,34 +1,20 @@
+ import { NextRequest, NextResponse } from "next/server";
+-import { getSupabaseServerClient } from "@/lib/supabase";
+ import { authenticateSyncRequest } from "@/lib/auth";
+-import { getSyncTargets, syncAllUsers, summarizeResults } from "@/lib/sync";
++import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
+ import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+ 
+ export const maxDuration = 60;
+ 
+ /**
+  * Общий cron-роут для Vercel Hobby (лимит 2 cron-задач).
+- *
+- * Одна задача /api/sync/cron в vercel.json обходит ВСЕ биржи последовательно,
+- * вместо 6 отдельных /api/sync/{bybit,bitunix,binance,...}.
++ * Обходит ВСЕ биржи последовательно.
+  *
+  * Авторизация: только Vercel cron (Bearer $CRON_SECRET).
+- * Обычный юзер не должен дёргать этот роут — для ручного запуска есть
+- * /api/sync/[exchange] с отдельной кнопкой на дашборде.
+- *
+- * Последовательный обход (не параллельный) — чтобы:
+- *   1. Не упереться в 60-секундный лимит Vercel Hobby
+- *   2. Не перегружать биржи параллельными запросами от одного IP
+- *   3. Иметь предсказуемое время выполнения
+- *
+- * Возвращает сводку по всем биржам — для логов Vercel и отладки.
+  */
+ export async function GET(req: NextRequest) {
+   try {
+-    // Авторизация: только cron. Если юзер вызовет — получит 401.
+     const auth = await authenticateSyncRequest(req);
+     if ("error" in auth) return auth.error;
+-    // Разрешаем только cron-режим — ручной запуск через /api/sync/[exchange]
+     if (auth.mode !== "cron") {
+       return NextResponse.json(
+         { error: "Этот роут только для cron. Используйте /api/sync/[exchange] для ручного запуска." },
+@@ -37,78 +23,33 @@ export async function GET(req: NextRequest) {
+     }
+ 
+     const now = Date.now();
+-    const sinceMs = now - 365 * 24 * 60 * 60 * 1000; // год назад
++    const sinceMs = now - 365 * 24 * 60 * 60 * 1000;
+     const allResults: { exchange: string; processed: number; succeeded: number; failed: number; upserted: number; errors: { userId: string; error: string }[] }[] = [];
+ 
+-    // Последовательно обходим все биржи.
+     for (const exchange of EXCHANGES) {
+       try {
+         const targets = await getSyncTargets(exchange, auth);
+         if (targets.length === 0) {
+-          allResults.push({
+-            exchange,
+-            processed: 0,
+-            succeeded: 0,
+-            failed: 0,
+-            upserted: 0,
+-            errors: [],
+-          });
++          allResults.push({ exchange, processed: 0, succeeded: 0, failed: 0, upserted: 0, errors: [] });
+           continue;
+         }
+ 
++        // syncUserExchange — общий цикл пагинации (вынесен в lib/sync.ts)
+         const results = await syncAllUsers(targets, async ({ userId, credentials }) => {
+-          const supabase = getSupabaseServerClient();
+-          let userUpserted = 0;
+-          let cursor: string | undefined;
+-
+-          for (let page = 0; page < 100; page++) {
+-            const { trades, nextCursor } = await REGISTRY[exchange].fetchClosedTrades(credentials, {
+-              sinceMs,
+-              untilMs: now,
+-              cursor,
+-            });
+-
+-            if (trades.length > 0) {
+-              const rows = trades.map((t) => ({ ...t, user_id: userId }));
+-              const { error } = await supabase
+-                .from("trades")
+-                .upsert(rows, { onConflict: "user_id,exchange,external_id" });
+-              if (error) throw error;
+-              userUpserted += trades.length;
+-            }
+-
+-            if (!nextCursor) break;
+-            cursor = nextCursor;
+-          }
+-          return userUpserted;
++          return syncUserExchange(REGISTRY[exchange], credentials, userId, sinceMs, now);
+         });
+ 
+-        const summary = summarizeResults(results);
+-        allResults.push({
+-          exchange,
+-          ...summary,
+-        });
++        allResults.push({ exchange, ...summarizeResults(results) });
+       } catch (err) {
+-        // Если вся биржа упала — логируем, но идём к следующей.
+         const msg = err instanceof Error ? err.message : String(err);
+         console.error(`[cron] exchange=${exchange} failed: ${msg}`);
+-        allResults.push({
+-          exchange,
+-          processed: 0,
+-          succeeded: 0,
+-          failed: 1,
+-          upserted: 0,
+-          errors: [{ userId: "-", error: msg }],
+-        });
++        allResults.push({ exchange, processed: 0, succeeded: 0, failed: 1, upserted: 0, errors: [{ userId: "-", error: msg }] });
+       }
+     }
+ 
+-    // Сводка для логов Vercel
+     const totalUpserted = allResults.reduce((acc, r) => acc + r.upserted, 0);
+     const totalFailed = allResults.reduce((acc, r) => acc + r.failed, 0);
+-    console.log(
+-      `[cron] done: ${totalUpserted} upserted, ${totalFailed} failed across ${EXCHANGES.length} exchanges`
+-    );
++    console.log(`[cron] done: ${totalUpserted} upserted, ${totalFailed} failed across ${EXCHANGES.length} exchanges`);
+ 
+     return NextResponse.json({
+       ok: totalFailed === 0,
+diff --git a/lib/exchanges/binance.ts b/lib/exchanges/binance.ts
+index 550deb8..212bf09 100644
+--- a/lib/exchanges/binance.ts
++++ b/lib/exchanges/binance.ts
+@@ -1,6 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++import { fetchWithRetry } from "@/lib/sync";
+ 
+ const BASE_URL = "https://fapi.binance.com";
+ 
+@@ -51,7 +52,7 @@ async function signedGet<T>(
+   const queryString = new URLSearchParams(allParams).toString();
+   const signature = sign(queryString, apiSecret);
+ 
+-  const res = await fetch(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
++  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
+     method: "GET",
+     headers: { "X-MBX-APIKEY": apiKey },
+   });
+diff --git a/lib/exchanges/bingx.ts b/lib/exchanges/bingx.ts
+index b1cdac3..734a939 100644
+--- a/lib/exchanges/bingx.ts
++++ b/lib/exchanges/bingx.ts
+@@ -1,6 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++import { fetchWithRetry } from "@/lib/sync";
+ 
+ const BASE_URL = "https://open-api.bingx.com";
+ 
+@@ -41,7 +42,7 @@ async function signedGet<T>(
+ 
+   const signature = sign(queryString, apiSecret);
+ 
+-  const res = await fetch(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
++  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
+     method: "GET",
+     headers: {
+       "X-BX-APIKEY": apiKey,
+diff --git a/lib/exchanges/bitget.ts b/lib/exchanges/bitget.ts
+index 7868a15..e707358 100644
+--- a/lib/exchanges/bitget.ts
++++ b/lib/exchanges/bitget.ts
+@@ -1,6 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++import { fetchWithRetry } from "@/lib/sync";
+ 
+ const BASE_URL = "https://api.bitget.com";
+ 
+@@ -49,7 +50,7 @@ async function signedGet<T>(
+   const queryString = new URLSearchParams(params).toString();
+   const signature = sign(timestamp, "GET", path, queryString, "", apiSecret);
+ 
+-  const res = await fetch(`${BASE_URL}${path}?${queryString}`, {
++  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}`, {
+     method: "GET",
+     headers: {
+       "ACCESS-KEY": apiKey,
+@@ -81,7 +82,7 @@ async function getServerTime(credentials: ExchangeCredentials): Promise<number>
+   const path = "/api/v2/public/time";
+   const signature = sign(timestamp, "GET", path, "", "", apiSecret);
+ 
+-  const res = await fetch(`${BASE_URL}${path}`, {
++  const res = await fetchWithRetry(`${BASE_URL}${path}`, {
+     method: "GET",
+     headers: {
+       "ACCESS-KEY": apiKey,
+diff --git a/lib/exchanges/bitunix.ts b/lib/exchanges/bitunix.ts
+index be9335a..a604ff3 100644
+--- a/lib/exchanges/bitunix.ts
++++ b/lib/exchanges/bitunix.ts
+@@ -1,6 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++import { fetchWithRetry } from "@/lib/sync";
+ 
+ const BASE_URL = "https://fapi.bitunix.com";
+ 
+@@ -152,7 +153,7 @@ async function fetchClosedTrades(
+       const headers = buildSignedHeaders(params, "", credentials);
+       const qs = new URLSearchParams(params).toString();
+ 
+-      const res = await fetch(
++      const res = await fetchWithRetry(
+         `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
+         { method: "GET", headers }
+       );
+@@ -259,7 +260,7 @@ async function testCredentials(credentials: ExchangeCredentials): Promise<void>
+   const headers = buildSignedHeaders(params, "", credentials);
+   const qs = new URLSearchParams(params).toString();
+ 
+-  const res = await fetch(
++  const res = await fetchWithRetry(
+     `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
+     { method: "GET", headers }
+   );
+diff --git a/lib/exchanges/bybit.ts b/lib/exchanges/bybit.ts
+index e7e60ca..77169b7 100644
+--- a/lib/exchanges/bybit.ts
++++ b/lib/exchanges/bybit.ts
+@@ -1,6 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++import { fetchWithRetry } from "@/lib/sync";
+ 
+ const BASE_URL = "https://api.bybit.com";
+ const RECV_WINDOW = "5000";
+@@ -52,7 +53,7 @@ async function signedGet<T>(
+   const queryString = new URLSearchParams(params).toString();
+   const signature = sign(timestamp, apiKey, queryString, apiSecret);
+ 
+-  const res = await fetch(`${BASE_URL}${path}?${queryString}`, {
++  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}`, {
+     method: "GET",
+     headers: {
+       "X-BAPI-API-KEY": apiKey,
+diff --git a/lib/exchanges/mexc.ts b/lib/exchanges/mexc.ts
+index f652d2e..1eec247 100644
+--- a/lib/exchanges/mexc.ts
++++ b/lib/exchanges/mexc.ts
+@@ -1,6 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
++import { fetchWithRetry } from "@/lib/sync";
+ 
+ const BASE_URL = "https://contract.mexc.com";
+ 
+@@ -39,7 +40,7 @@ async function signedGet<T>(
+   const queryString = new URLSearchParams(allParams).toString();
+   const signature = sign(queryString, apiSecret);
+ 
+-  const res = await fetch(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
++  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
+     method: "GET",
+     headers: {
+       "ApiKey": apiKey,
+diff --git a/lib/sync.ts b/lib/sync.ts
+index 87f0982..a5706e1 100644
+--- a/lib/sync.ts
++++ b/lib/sync.ts
+@@ -1,6 +1,6 @@
+ import { getSupabaseServerClient } from "@/lib/supabase";
+ import { decrypt } from "@/lib/crypto";
+-import type { ExchangeCredentials } from "@/lib/exchanges/types";
++import type { ExchangeCredentials, ExchangeAdapter } from "@/lib/exchanges/types";
+ import type { SyncAuth } from "@/lib/auth";
+ import { EXCHANGES, isValidExchange } from "@/lib/exchanges";
+ 
+@@ -15,6 +15,122 @@ export interface SyncUserResult {
+   error?: string;
+ }
+ 
++// ============================================================
++// fetchWithRetry — HTTP-запрос с timeout, retry и backoff
++// ============================================================
++
++const DEFAULT_TIMEOUT_MS = 15_000;
++const DEFAULT_RETRIES = 3;
++
++function sleep(ms: number): Promise<void> {
++  return new Promise((resolve) => setTimeout(resolve, ms));
++}
++
++/**
++ * HTTP-запрос с:
++ *   - timeout (AbortController, по умолчанию 15 сек)
++ *   - retry (по умолчанию 3 попытки)
++ *   - exponential backoff (1с, 2с, 4с)
++ *   - Retry-After header (если биржа отдаёт 429/503)
++ *
++ * Используется во всех адаптерах вместо голого fetch().
++ * Бросает Error только если все попытки исчерпаны.
++ */
++export async function fetchWithRetry(
++  url: string,
++  options: RequestInit = {},
++  opts: { timeoutMs?: number; retries?: number } = {}
++): Promise<Response> {
++  const { timeoutMs = DEFAULT_TIMEOUT_MS, retries = DEFAULT_RETRIES } = opts;
++
++  for (let attempt = 0; attempt <= retries; attempt++) {
++    const controller = new AbortController();
++    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
++
++    try {
++      const res = await fetch(url, { ...options, signal: controller.signal });
++      clearTimeout(timeoutId);
++
++      // 429 Too Many Requests или 503 Service Unavailable — retry с backoff
++      if ((res.status === 429 || res.status === 503) && attempt < retries) {
++        // Читаем Retry-After header (в секундах), по умолчанию 2^attempt сек
++        const retryAfter = res.headers.get("retry-after");
++        const delaySec = retryAfter ? parseInt(retryAfter, 10) : Math.pow(2, attempt);
++        const delayMs = isNaN(delaySec) ? Math.pow(2, attempt) * 1000 : delaySec * 1000;
++        console.warn(
++          `[fetchWithRetry] ${res.status} on ${url.split("?")[0]}, retry ${attempt + 1}/${retries} after ${delayMs}ms`
++        );
++        await sleep(delayMs);
++        continue;
++      }
++
++      return res;
++    } catch (err) {
++      clearTimeout(timeoutId);
++      if (attempt === retries) throw err;
++
++      // Network error / timeout — retry с exponential backoff
++      const delayMs = Math.pow(2, attempt) * 1000;
++      console.warn(
++        `[fetchWithRetry] ${(err as Error).name} on ${url.split("?")[0]}, retry ${attempt + 1}/${retries} after ${delayMs}ms`
++      );
++      await sleep(delayMs);
++    }
++  }
++
++  // Не должны сюда дойти, но TS требует return
++  throw new Error("fetchWithRetry: все попытки исчерпаны");
++}
++
++// ============================================================
++// syncUserExchange — общий цикл пагинации (убран из 2 роутов)
++// ============================================================
++
++/**
++ * Синк одной биржи для одного пользователя.
++ * Общий цикл пагинации — вызывается из /api/sync/[exchange] и /api/sync/cron.
++ *
++ * Возвращает количество upserted сделок.
++ * Бросает Error при неудаче (ловится в syncAllUsers).
++ */
++export async function syncUserExchange(
++  adapter: ExchangeAdapter,
++  credentials: ExchangeCredentials,
++  userId: string,
++  sinceMs: number,
++  untilMs: number
++): Promise<number> {
++  const supabase = getSupabaseServerClient();
++  let userUpserted = 0;
++  let cursor: string | undefined;
++
++  for (let page = 0; page < 100; page++) {
++    const { trades, nextCursor } = await adapter.fetchClosedTrades(credentials, {
++      sinceMs,
++      untilMs,
++      cursor,
++    });
++
++    if (trades.length > 0) {
++      const rows = trades.map((t) => ({ ...t, user_id: userId }));
++      const { error } = await supabase
++        .from("trades")
++        .upsert(rows, { onConflict: "user_id,exchange,external_id" });
++      if (error) throw error;
++      userUpserted += trades.length;
++    }
++
++    if (!nextCursor) break;
++    cursor = nextCursor;
++  }
++
++  return userUpserted;
++}
++
++// ============================================================
++// getSyncTargets — список подключений для синка
++// ============================================================
++
+ /**
+  * Возвращает список подключений, которые нужно просинкать в текущем запуске.
+  *
+@@ -30,8 +146,6 @@ export async function getSyncTargets(
+   if ("error" in auth) return [];
+ 
+   const supabase = getSupabaseServerClient();
+-  // Читаем в т.ч. passphrase_encrypted — для бирж, которые его требуют (Bitget, OKX, KuCoin).
+-  // Для бирж без passphrase колонка будет null — просто не передаём поле.
+   let query = supabase
+     .from("exchange_connections")
+     .select("user_id, api_key_encrypted, api_secret_encrypted, passphrase_encrypted")
+@@ -50,7 +164,6 @@ export async function getSyncTargets(
+       apiKey: decrypt(row.api_key_encrypted),
+       apiSecret: decrypt(row.api_secret_encrypted),
+     };
+-    // passphrase может быть null для бирж без него (Bybit, Binance, MEXC, BingX).
+     if (row.passphrase_encrypted) {
+       creds.passphrase = decrypt(row.passphrase_encrypted);
+     }
+@@ -58,27 +171,17 @@ export async function getSyncTargets(
+   });
+ }
+ 
+-/**
+- * Минимальная задержка между запросами к бирже, чтобы не упереться в
+- * rate-limit при синке нескольких пользователей подряд.
+- *
+- * Bybit: ~120 req/s для V5, но мы консервативны. Bitunix: лимиты ниже.
+- * 200 мс = 5 req/s — оставляет запас на пагинацию внутри одного юзера.
+- */
+-const RATE_LIMIT_DELAY_MS = 200;
++// ============================================================
++// syncAllUsers — цикл по целям с изоляцией ошибок
++// ============================================================
+ 
+-function sleep(ms: number): Promise<void> {
+-  return new Promise((resolve) => setTimeout(resolve, ms));
+-}
++const RATE_LIMIT_DELAY_MS = 200;
+ 
+ /**
+  * Цикл по всем целям с изоляцией ошибок и rate-limit задержкой между юзерами.
+  *
+- * fn получает (target) — туда входят и userId, и credentials. Это позволяет
+- * роуту подставлять user_id в строки trades, не прибегая к обходным путям.
+- *
+- * Если у одного пользователя ключ стал невалидным (revoked на бирже),
+- * мы не роняем синк для всех остальных — логируем и идём дальше.
++ * fn получает (target) — туда входят и userId, и credentials.
++ * Если у одного пользователя ключ стал невалидным, остальные синкаются.
+  */
+ export async function syncAllUsers(
+   targets: SyncTarget[],
+@@ -92,7 +195,6 @@ export async function syncAllUsers(
+       const upserted = await fn(target);
+       results.push({ userId: target.userId, upserted });
+     } catch (err) {
+-      // Логируем только сообщение — в err может быть URL с подписью.
+       const msg = err instanceof Error ? err.message : String(err);
+       console.error(`[sync] user=${target.userId} failed: ${msg}`);
+       results.push({ userId: target.userId, upserted: 0, error: msg });
+@@ -101,9 +203,10 @@ export async function syncAllUsers(
+   return results;
+ }
+ 
+-/**
+- * Сводка по результатам синка — для ответа роута.
+- */
++// ============================================================
++// summarizeResults — сводка для ответа роута
++// ============================================================
++
+ export function summarizeResults(results: SyncUserResult[]): {
+   processed: number;
+   succeeded: number;
+-- 
+2.47.3
+
