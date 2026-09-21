@@ -20,6 +20,7 @@ export const metadata: Metadata = {
 
 // Предотвращаем FOUC (flash of unstyled content) — скрипт применяет тему
 // из localStorage ДО первого рендера, чтобы не было мигания.
+// + Регистрация Service Worker для PWA (установка на телефон).
 const themeInitScript = `
   (function() {
     try {
@@ -29,6 +30,13 @@ const themeInitScript = `
         : saved;
       document.documentElement.setAttribute('data-theme', resolved);
     } catch (e) {}
+
+    // Регистрируем Service Worker для PWA
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('/sw.js').catch(function(e) {});
+      });
+    }
   })();
 `;
 
