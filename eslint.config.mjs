@@ -1,20 +1,22 @@
 // @ts-check
 import eslintConfigNext from "eslint-config-next";
+import tseslint from "typescript-eslint";
 
 export default [
   ...eslintConfigNext,
+  ...tseslint.configs.recommended,
   {
     rules: {
-      // Запрещаем console.error в production-коде (кроме lib/sync.ts, lib/exchanges/*)
       "no-console": ["warn", { allow: ["warn", "error"] }],
-      // Предупреждаем о неиспользуемых переменных
       "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
-      // Предупреждаем о any
       "@typescript-eslint/no-explicit-any": "warn",
+      "@typescript-eslint/no-empty-object-type": "off",
+      "prefer-const": "warn",
+      "react-hooks/set-state-in-effect": "warn",
+      "import/no-anonymous-default-export": "warn",
     },
   },
   {
-    // Разрешаем console.error в серверных роутах и адаптерах
     files: ["app/api/**/*.ts", "lib/sync.ts", "lib/exchanges/*.ts", "lib/admin.ts"],
     rules: {
       "no-console": "off",

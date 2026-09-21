@@ -102,7 +102,7 @@ async function fetchClosedTrades(
   const since = opts?.sinceMs ?? now - 365 * 24 * 60 * 60 * 1000;
 
   const allTrades: SyncedTrade[] = [];
-  let finalCursor: string | null = null;
+  const finalCursor: string | null = null;
 
   // Нарезаем на 7-дневные окна — Bybit не отдаёт больше за один запрос.
   for (let windowEnd = until; windowEnd > since; windowEnd -= SEVEN_DAYS_MS) {
