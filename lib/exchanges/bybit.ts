@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
 import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+import { fetchWithRetry } from "@/lib/sync";
 
 const BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
@@ -52,7 +53,7 @@ async function signedGet<T>(
   const queryString = new URLSearchParams(params).toString();
   const signature = sign(timestamp, apiKey, queryString, apiSecret);
 
-  const res = await fetch(`${BASE_URL}${path}?${queryString}`, {
+  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}`, {
     method: "GET",
     headers: {
       "X-BAPI-API-KEY": apiKey,

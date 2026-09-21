@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
 import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+import { fetchWithRetry } from "@/lib/sync";
 
 const BASE_URL = "https://open-api.bingx.com";
 
@@ -41,7 +42,7 @@ async function signedGet<T>(
 
   const signature = sign(queryString, apiSecret);
 
-  const res = await fetch(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
+  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}&signature=${signature}`, {
     method: "GET",
     headers: {
       "X-BX-APIKEY": apiKey,

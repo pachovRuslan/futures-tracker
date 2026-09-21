@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
 import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+import { fetchWithRetry } from "@/lib/sync";
 
 const BASE_URL = "https://api.bitget.com";
 
@@ -49,7 +50,7 @@ async function signedGet<T>(
   const queryString = new URLSearchParams(params).toString();
   const signature = sign(timestamp, "GET", path, queryString, "", apiSecret);
 
-  const res = await fetch(`${BASE_URL}${path}?${queryString}`, {
+  const res = await fetchWithRetry(`${BASE_URL}${path}?${queryString}`, {
     method: "GET",
     headers: {
       "ACCESS-KEY": apiKey,
@@ -81,7 +82,7 @@ async function getServerTime(credentials: ExchangeCredentials): Promise<number> 
   const path = "/api/v2/public/time";
   const signature = sign(timestamp, "GET", path, "", "", apiSecret);
 
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetchWithRetry(`${BASE_URL}${path}`, {
     method: "GET",
     headers: {
       "ACCESS-KEY": apiKey,

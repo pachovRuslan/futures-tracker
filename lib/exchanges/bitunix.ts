@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
 import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+import { fetchWithRetry } from "@/lib/sync";
 
 const BASE_URL = "https://fapi.bitunix.com";
 
@@ -152,7 +153,7 @@ async function fetchClosedTrades(
       const headers = buildSignedHeaders(params, "", credentials);
       const qs = new URLSearchParams(params).toString();
 
-      const res = await fetch(
+      const res = await fetchWithRetry(
         `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
         { method: "GET", headers }
       );
@@ -259,7 +260,7 @@ async function testCredentials(credentials: ExchangeCredentials): Promise<void> 
   const headers = buildSignedHeaders(params, "", credentials);
   const qs = new URLSearchParams(params).toString();
 
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `${BASE_URL}/api/v1/futures/position/get_history_positions?${qs}`,
     { method: "GET", headers }
   );
