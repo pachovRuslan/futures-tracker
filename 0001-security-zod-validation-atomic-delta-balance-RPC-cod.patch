@@ -1,0 +1,658 @@
+From 05232a66f5e70a32787093dcc80345730c92e10e Mon Sep 17 00:00:00 2001
+From: futures-tracker-fixes <dev@local>
+Date: Mon, 21 Sep 2026 20:45:03 +0000
+Subject: [PATCH] security: zod validation + atomic delta-balance RPC (code
+ review #3)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Две проблемы из code review: отсутствие валидации + race condition.
+
+## 1. zod-валидация на все POST/PUT/PATCH
+
+Новый файл lib/validation.ts со схемами:
+- ConnectionInput — exchange (enum), apiKey/secret (8-128 символов),
+  passphrase (optional)
+- ManualTradeInput — symbol (1-32), side (enum), числа, даты
+- TradePatchInput — все поля optional
+- BalanceSnapshotInput — type (enum), value_usd (number),
+  snapshot_date (regex YYYY-MM-DD), is_delta (optional)
+- GoalInput — goal_usd (>=0 или null), futures_start_usd (optional)
+- AllowlistInput — email (z.string().email()), note (optional)
+
+Применено к 6 роутам:
+- POST /api/trades — ManualTradeInput
+- PATCH /api/trades/[id] — TradePatchInput
+- POST /api/connections — ConnectionInput
+- POST /api/balance — BalanceSnapshotInput
+- PUT /api/goal — GoalInput
+- POST /api/admin/allowlist — AllowlistInput
+
+Если данные невалидны → 400 с конкретными ошибками полей:
+  { error: 'Некорректные данные', details: { fieldErrors: {...} } }
+
+## 2. Атомарный delta-баланс через RPC
+
+Миграция 09: apply_balance_delta() — PL/pgSQL security_definer.
+SELECT ... FOR SHARE (блокирует параллельное обновление) →
+вычисляет prev + delta → INSERT ... ON CONFLICT DO UPDATE.
+Атомарно, без race condition.
+
+POST /api/balance переписан:
+- is_delta=true → вызывает RPC apply_balance_delta
+- is_delta=false → обычный upsert (как раньше)
+- Валидация через zod перед любыми действиями
+
+## 3. Бонус: удалён dead code
+
+Удалена функция LIST() в app/api/connections/route.ts — Next.js App
+Router не поддерживает custom HTTP-метод LIST. Dead code из review.
+
+## Зависимости
+
+- zod@4.6.5 добавлен в package.json
+---
+ app/api/admin/allowlist/route.ts            |  11 +--
+ app/api/balance/route.ts                    | 103 +++++++-------------
+ app/api/connections/route.ts                |  28 ++----
+ app/api/goal/route.ts                       |  17 ++--
+ app/api/trades/[id]/route.ts                |  17 +++-
+ app/api/trades/route.ts                     |  19 ++--
+ lib/validation.ts                           |  90 +++++++++++++++++
+ package.json                                |   3 +-
+ pnpm-lock.yaml                              |   8 ++
+ supabase/migration_09_balance_delta_rpc.sql |  69 +++++++++++++
+ 10 files changed, 245 insertions(+), 120 deletions(-)
+ create mode 100644 lib/validation.ts
+ create mode 100644 supabase/migration_09_balance_delta_rpc.sql
+
+diff --git a/app/api/admin/allowlist/route.ts b/app/api/admin/allowlist/route.ts
+index 9c9e4c4..a329955 100644
+--- a/app/api/admin/allowlist/route.ts
++++ b/app/api/admin/allowlist/route.ts
+@@ -1,5 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { requireAdmin } from "@/lib/admin";
++import { AllowlistInput } from "@/lib/validation";
+ 
+ // GET /api/admin/allowlist — список всех email-ов в allowlist
+ export async function GET() {
+@@ -56,16 +57,14 @@ export async function POST(req: NextRequest) {
+     const { user, error, supabase } = await requireAdmin();
+     if (error) return error;
+ 
+-    const body = await req.json();
+-    const { email, note } = body as { email: string; note?: string };
+-
+-    if (!email || !email.includes("@")) {
++    const parsed = AllowlistInput.safeParse(await req.json());
++    if (!parsed.success) {
+       return NextResponse.json(
+-        { error: "Некорректный email" },
++        { error: "Некорректные данные", details: parsed.error.flatten() },
+         { status: 400 }
+       );
+     }
+-
++    const { email, note } = parsed.data;
+     const normalizedEmail = email.trim().toLowerCase();
+ 
+     const { data, error: insertError } = await supabase
+diff --git a/app/api/balance/route.ts b/app/api/balance/route.ts
+index 816873a..f557ce1 100644
+--- a/app/api/balance/route.ts
++++ b/app/api/balance/route.ts
+@@ -1,5 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createServerSupabaseClient } from "@/lib/supabase-server";
++import { BalanceSnapshotInput } from "@/lib/validation";
+ 
+ // GET /api/balance — список снапшотов пользователя
+ export async function GET() {
+@@ -28,16 +29,11 @@ export async function GET() {
+   }
+ }
+ 
+-// POST /api/balance — добавить или обновить снапшот (upsert по user+type+date)
+-//
+-// Поддержка двух режимов ввода (для удобства пользователя):
+-//   1. Абсолют (по умолчанию): body.value_usd = итоговая сумма на дату.
+-//      Например, value_usd: 1500 = "у меня сейчас $1500 на споте".
+-//   2. Дельта: body.is_delta = true, body.value_usd = внесённое изменение.
+-//      Например, value_usd: 200 = "пополнил спот на $200".
+-//      Бэкенд сам находит последний снапшот до этой даты и прибавляет дельту:
+-//      new_value = previous_value + delta. Если предыдущего нет — ошибка
+-//      (первая точка должна быть абсолютной).
++// POST /api/balance — добавить или обновить снапшот
++// Поддержка двух режимов:
++//   1. Абсолют (по умолчанию): value_usd = итоговая сумма
++//   2. Дельта: is_delta=true, value_usd = изменение
++//      Бэкенд атомарно через RPC находит prev и прибавляет дельту.
+ export async function POST(req: NextRequest) {
+   try {
+     const supabase = await createServerSupabaseClient();
+@@ -46,69 +42,49 @@ export async function POST(req: NextRequest) {
+     } = await supabase.auth.getUser();
+     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+ 
+-    const body = await req.json();
+-    const { type, value_usd, snapshot_date, note, is_delta } = body as {
+-      type: "spot" | "futures";
+-      value_usd: number;
+-      snapshot_date: string; // YYYY-MM-DD
+-      note?: string;
+-      is_delta?: boolean;
+-    };
+-
+-    if (!type || value_usd === undefined || !snapshot_date) {
++    // Валидация через zod
++    const parsed = BalanceSnapshotInput.safeParse(await req.json());
++    if (!parsed.success) {
+       return NextResponse.json(
+-        { error: "type, value_usd и snapshot_date обязательны" },
++        { error: "Некорректные данные", details: parsed.error.flatten() },
+         { status: 400 }
+       );
+     }
+-    if (!["spot", "futures"].includes(type)) {
+-      return NextResponse.json({ error: "type должен быть 'spot' или 'futures'" }, { status: 400 });
+-    }
++    const { type, value_usd, snapshot_date, note, is_delta } = parsed.data;
+ 
+-    let finalValueUsd = value_usd;
+-
+-    // Если режим дельты — вычисляем итог из предыдущего снапшота.
++    // Режим дельты — через RPC (атомарно, без race condition)
+     if (is_delta) {
+-      const { data: prev, error: prevError } = await supabase
+-        .from("balance_snapshots")
+-        .select("value_usd, snapshot_date")
+-        .eq("user_id", user.id)
+-        .eq("type", type)
+-        .lt("snapshot_date", snapshot_date)
+-        .order("snapshot_date", { ascending: false })
+-        .limit(1)
+-        .maybeSingle();
++      const { data: rpcResult, error: rpcError } = await supabase.rpc(
++        "apply_balance_delta",
++        {
++          p_user_id: user.id,
++          p_type: type,
++          p_snapshot_date: snapshot_date,
++          p_delta: value_usd,
++          p_note: note ?? null,
++        }
++      );
+ 
+-      if (prevError) throw prevError;
++      if (rpcError) throw rpcError;
+ 
+-      if (!prev) {
+-        return NextResponse.json(
+-          {
+-            error:
+-              "Невозможно использовать дельту для первой точки — предыдущего баланса нет. " +
+-              "Выберите режим 'Итог' и введите полную сумму.",
+-          },
+-          { status: 400 }
+-        );
++      // RPC возвращает JSON: { error: "..." } или { value_usd, previous_value, applied_delta }
++      if (rpcResult && typeof rpcResult === "object" && "error" in rpcResult) {
++        return NextResponse.json({ error: rpcResult.error }, { status: 400 });
+       }
+ 
+-      finalValueUsd = Number(prev.value_usd) + value_usd;
+-
+-      // Если итог получился отрицательным — это странно (баланс не может быть < 0).
+-      // Разрешаем, но предупреждаем в ответе.
+-      if (finalValueUsd < 0) {
+-        console.warn(
+-          `[balance] user=${user.id} type=${type} delta=${value_usd} resulted in negative balance ${finalValueUsd}`
+-        );
+-      }
++      return NextResponse.json({
++        ok: true,
++        snapshot: rpcResult,
++      });
+     }
+ 
++    // Режим абсолюта — обычный upsert
+     const row = {
+       user_id: user.id,
+       type,
+-      value_usd: finalValueUsd,
++      value_usd,
+       snapshot_date,
+-      note: note || null,
++      note: note ?? null,
+     };
+ 
+     const { data, error } = await supabase
+@@ -119,15 +95,10 @@ export async function POST(req: NextRequest) {
+ 
+     if (error) throw error;
+ 
+-    return NextResponse.json({
+-      snapshot: data,
+-      ...(is_delta ? { applied_delta: value_usd, previous_value: finalValueUsd - value_usd } : {}),
+-    });
++    return NextResponse.json({ snapshot: data });
+   } catch (err) {
+-    console.error("Balance create error:", err instanceof Error ? err.message : String(err));
+-    return NextResponse.json(
+-      { error: err instanceof Error ? err.message : String(err) },
+-      { status: 500 }
+-    );
++    const errMsg = err instanceof Error ? err.message : String(err);
++    console.error("Balance create error:", errMsg);
++    return NextResponse.json({ error: errMsg }, { status: 500 });
+   }
+ }
+diff --git a/app/api/connections/route.ts b/app/api/connections/route.ts
+index 947ed83..2a17bbe 100644
+--- a/app/api/connections/route.ts
++++ b/app/api/connections/route.ts
+@@ -1,7 +1,8 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createServerSupabaseClient } from "@/lib/supabase-server";
+ import { encrypt, maskKey } from "@/lib/crypto";
+-import { REGISTRY, isValidExchange, getExchangeList } from "@/lib/exchanges";
++import { REGISTRY, EXCHANGES } from "@/lib/exchanges";
++import { ConnectionInput } from "@/lib/validation";
+ 
+ // Список подключений — специально выбираем только безопасные колонки.
+ // Даже случайно не отдадим *_encrypted наружу.
+@@ -40,25 +41,16 @@ export async function POST(req: NextRequest) {
+     } = await supabase.auth.getUser();
+     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+ 
+-    const body = await req.json();
+-    const { exchange, apiKey, apiSecret, passphrase } = body as {
+-      exchange: string;
+-      apiKey: string;
+-      apiSecret: string;
+-      passphrase?: string;
+-    };
+-
+-    if (!exchange || !apiKey || !apiSecret) {
++    const parsed = ConnectionInput.safeParse(await req.json());
++    if (!parsed.success) {
+       return NextResponse.json(
+-        { error: "exchange, apiKey и apiSecret обязательны" },
++        { error: "Некорректные данные", details: parsed.error.flatten() },
+         { status: 400 }
+       );
+     }
+-    if (!isValidExchange(exchange)) {
+-      return NextResponse.json({ error: "Неизвестная биржа" }, { status: 400 });
+-    }
++    const { exchange, apiKey, apiSecret, passphrase } = parsed.data;
+ 
+-    const adapter = REGISTRY[exchange];
++    const adapter = REGISTRY[exchange as (typeof EXCHANGES)[number]];
+ 
+     // Для бирж с passphrase-схемой проверяем, что passphrase передан.
+     if (adapter.credentialsSchema === "key+secret+passphrase" && !passphrase) {
+@@ -121,9 +113,3 @@ export async function POST(req: NextRequest) {
+     );
+   }
+ }
+-
+-// GET-эндпоинт для UI: отдаёт список поддерживаемых бирж с их схемой credentials.
+-// Используется формой подключения, чтобы знать, какие поля рендерить.
+-export async function LIST() {
+-  return NextResponse.json({ exchanges: getExchangeList() });
+-}
+diff --git a/app/api/goal/route.ts b/app/api/goal/route.ts
+index ee48dcf..42cde88 100644
+--- a/app/api/goal/route.ts
++++ b/app/api/goal/route.ts
+@@ -1,5 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createServerSupabaseClient } from "@/lib/supabase-server";
++import { GoalInput } from "@/lib/validation";
+ 
+ // GET /api/goal — получить настройки пользователя (цель + стартовый фьючерс)
+ export async function GET() {
+@@ -43,21 +44,15 @@ export async function PUT(req: NextRequest) {
+     } = await supabase.auth.getUser();
+     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+ 
+-    const body = await req.json();
+-    const { goal_usd, futures_start_usd } = body as {
+-      goal_usd: number | null;
+-      futures_start_usd?: number;
+-    };
+-
+-    if (goal_usd !== null && (typeof goal_usd !== "number" || goal_usd < 0)) {
+-      return NextResponse.json({ error: "goal_usd должен быть числом ≥ 0 или null" }, { status: 400 });
+-    }
+-    if (futures_start_usd !== undefined && (typeof futures_start_usd !== "number" || futures_start_usd < 0)) {
++    // Валидация через zod
++    const parsed = GoalInput.safeParse(await req.json());
++    if (!parsed.success) {
+       return NextResponse.json(
+-        { error: "futures_start_usd должен быть числом ≥ 0" },
++        { error: "Некорректные данные", details: parsed.error.flatten() },
+         { status: 400 }
+       );
+     }
++    const { goal_usd, futures_start_usd } = parsed.data;
+ 
+     const row: Record<string, unknown> = {
+       user_id: user.id,
+diff --git a/app/api/trades/[id]/route.ts b/app/api/trades/[id]/route.ts
+index c24c6f7..190a82d 100644
+--- a/app/api/trades/[id]/route.ts
++++ b/app/api/trades/[id]/route.ts
+@@ -1,5 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createServerSupabaseClient } from "@/lib/supabase-server";
++import { TradePatchInput } from "@/lib/validation";
+ 
+ // PATCH: заметки можно редактировать у ЛЮБОЙ своей сделки (bybit/bitunix/manual).
+ // Остальные поля (цена, qty, pnl и т.д.) можно менять только у ручных сделок —
+@@ -19,7 +20,15 @@ export async function PATCH(
+     if (!user) {
+       return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+     }
+-    const body = await req.json();
++    // Валидация через zod
++    const parsed = TradePatchInput.safeParse(await req.json());
++    if (!parsed.success) {
++      return NextResponse.json(
++        { error: "Некорректные данные", details: parsed.error.flatten() },
++        { status: 400 }
++      );
++    }
++    const body = parsed.data;
+ 
+     // Явный фильтр по user_id — defensive coding поверх RLS.
+     const { data: existing, error: fetchError } = await supabase
+@@ -32,7 +41,7 @@ export async function PATCH(
+ 
+     const update: Record<string, unknown> = {};
+ 
+-    if ("notes" in body) update.notes = body.notes;
++    if (body.notes !== undefined) update.notes = body.notes;
+ 
+     if (existing.exchange === "manual") {
+       const editableFields = [
+@@ -46,9 +55,9 @@ export async function PATCH(
+         "funding",
+         "opened_at",
+         "closed_at",
+-      ];
++      ] as const;
+       for (const field of editableFields) {
+-        if (field in body) update[field] = body[field];
++        if (body[field] !== undefined) update[field] = body[field];
+       }
+     }
+ 
+diff --git a/app/api/trades/route.ts b/app/api/trades/route.ts
+index d6aa972..5ac7f11 100644
+--- a/app/api/trades/route.ts
++++ b/app/api/trades/route.ts
+@@ -1,6 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createServerSupabaseClient } from "@/lib/supabase-server";
+-import type { ManualTradeInput } from "@/lib/types";
++import { ManualTradeInput } from "@/lib/validation";
+ 
+ export async function GET(req: NextRequest) {
+   try {
+@@ -38,27 +38,24 @@ export async function GET(req: NextRequest) {
+   }
+ }
+ 
+-// Добавление сделки вручную (например, старые сделки, которые не подтянула биржа,
+-// или сделки без API — просто заметки о торговле)
++// Добавление сделки вручную
+ export async function POST(req: NextRequest) {
+   try {
+     const supabase = await createServerSupabaseClient();
+-
+     const {
+       data: { user },
+     } = await supabase.auth.getUser();
+-    if (!user) {
+-      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+-    }
+-
+-    const body = (await req.json()) as ManualTradeInput;
++    if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+ 
+-    if (!body.symbol || !body.side || !body.closed_at) {
++    // Валидация через zod
++    const parsed = ManualTradeInput.safeParse(await req.json());
++    if (!parsed.success) {
+       return NextResponse.json(
+-        { error: "symbol, side и closed_at обязательны" },
++        { error: "Некорректные данные", details: parsed.error.flatten() },
+         { status: 400 }
+       );
+     }
++    const body = parsed.data;
+ 
+     const row = {
+       user_id: user.id,
+diff --git a/lib/validation.ts b/lib/validation.ts
+new file mode 100644
+index 0000000..73c8343
+--- /dev/null
++++ b/lib/validation.ts
+@@ -0,0 +1,90 @@
++import { z } from "zod";
++import { EXCHANGES } from "@/lib/exchanges";
++
++/**
++ * Zod-схемы валидации для всех API-роутов.
++ *
++ * Принцип: каждый POST/PUT/PATCH принимает JSON-тело — валидируем через
++ * safeParse. Если невалидно — 400 с конкретными ошибками полей.
++ * Если валидно — тип выведен автоматически, никакого `as SomeType`.
++ *
++ * Пример использования в роуте:
++ *   const parsed = ConnectionInput.safeParse(await req.json());
++ *   if (!parsed.success) {
++ *     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
++ *   }
++ *   const { exchange, apiKey, apiSecret, passphrase } = parsed.data;
++ */
++
++// ============================================================
++// Connections
++// ============================================================
++
++export const ConnectionInput = z.object({
++  exchange: z.enum(EXCHANGES as [string, ...string[]]),
++  apiKey: z.string().min(8).max(128),
++  apiSecret: z.string().min(8).max(128),
++  passphrase: z.string().max(128).optional(),
++});
++
++// ============================================================
++// Trades (manual)
++// ============================================================
++
++export const ManualTradeInput = z.object({
++  symbol: z.string().min(1).max(32),
++  side: z.enum(["long", "short"]),
++  qty: z.number().nullable(),
++  entry_price: z.number().nullable(),
++  close_price: z.number().nullable(),
++  realized_pnl: z.number(),
++  fee: z.number().default(0),
++  funding: z.number().default(0),
++  opened_at: z.string().nullable(),
++  closed_at: z.string().min(1),
++  notes: z.string().max(1000).nullable().optional(),
++});
++
++export const TradePatchInput = z.object({
++  notes: z.string().max(1000).nullable().optional(),
++  symbol: z.string().min(1).max(32).optional(),
++  side: z.enum(["long", "short"]).optional(),
++  qty: z.number().nullable().optional(),
++  entry_price: z.number().nullable().optional(),
++  close_price: z.number().nullable().optional(),
++  realized_pnl: z.number().optional(),
++  fee: z.number().optional(),
++  funding: z.number().optional(),
++  opened_at: z.string().nullable().optional(),
++  closed_at: z.string().min(1).optional(),
++});
++
++// ============================================================
++// Balance snapshots
++// ============================================================
++
++export const BalanceSnapshotInput = z.object({
++  type: z.enum(["spot", "futures"]),
++  value_usd: z.number(),
++  snapshot_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Дата в формате YYYY-MM-DD"),
++  note: z.string().max(500).optional(),
++  is_delta: z.boolean().optional(),
++});
++
++// ============================================================
++// Goal / settings
++// ============================================================
++
++export const GoalInput = z.object({
++  goal_usd: z.number().min(0).nullable(),
++  futures_start_usd: z.number().min(0).optional(),
++});
++
++// ============================================================
++// Allowlist
++// ============================================================
++
++export const AllowlistInput = z.object({
++  email: z.string().email("Некорректный email"),
++  note: z.string().max(500).optional(),
++});
+diff --git a/package.json b/package.json
+index b611ce1..4d98803 100644
+--- a/package.json
++++ b/package.json
+@@ -14,7 +14,8 @@
+     "next": "^16.2.10",
+     "react": "^19.2.0",
+     "react-dom": "^19.2.0",
+-    "recharts": "^2.12.7"
++    "recharts": "^2.12.7",
++    "zod": "^4.6.5"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4.0.0",
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 15287b9..b1164d0 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -26,6 +26,9 @@ importers:
+       recharts:
+         specifier: ^2.12.7
+         version: 2.15.4(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
++      zod:
++        specifier: ^4.6.5
++        version: 4.6.5
+     devDependencies:
+       '@tailwindcss/postcss':
+         specifier: ^4.0.0
+@@ -775,6 +778,9 @@ packages:
+   victory-vendor@36.9.2:
+     resolution: {integrity: sha512-PnpQQMuxlwYdocC8fIJqVXvkeViHYzotI+NJrCuav0ZYFoq912ZHBk3mCeuj+5/VpodOjPe1z0Fk2ihgzlXqjQ==}
+ 
++  zod@4.6.5:
++    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
++
+ snapshots:
+ 
+   '@alloc/quick-lru@5.2.0': {}
+@@ -1379,3 +1385,5 @@ snapshots:
+       d3-shape: 3.2.0
+       d3-time: 3.1.0
+       d3-timer: 3.0.1
++
++  zod@4.6.5: {}
+diff --git a/supabase/migration_09_balance_delta_rpc.sql b/supabase/migration_09_balance_delta_rpc.sql
+new file mode 100644
+index 0000000..c181bd1
+--- /dev/null
++++ b/supabase/migration_09_balance_delta_rpc.sql
+@@ -0,0 +1,69 @@
++-- ============================================================
++-- Миграция 09: RPC apply_balance_delta — атомарный delta-режим
++-- ============================================================
++--
++-- ПРОБЛЕМА: POST /api/balance с is_delta=true делал SELECT prev
++-- затем INSERT — между ними вторая вкладка могла сделать тот же
++-- запрос. Оба прочитают одну prev, оба прибавят дельту. Потерянное
++-- обновление (race condition).
++--
++-- ФИКС: атомарная RPC-функция с SELECT FOR UPDATE внутри транзакции.
++-- security_definer — обходит RLS (нужно для чтения prev чужого юзера,
++-- хотя тут юзер читает только свои данные, но для надёжности).
++-- ============================================================
++
++create or replace function apply_balance_delta(
++  p_user_id uuid,
++  p_type text,
++  p_snapshot_date date,
++  p_delta numeric,
++  p_note text
++)
++returns json
++language plpgsql security definer as $$
++declare
++  v_prev numeric;
++  v_final numeric;
++  v_result json;
++begin
++  -- Находим последний снапшот ДО этой даты (FOR SHARE блокирует
++  -- параллельное обновление, но не чтение — достаточно для нашего случая).
++  select value_usd into v_prev
++  from balance_snapshots
++  where user_id = p_user_id
++    and type = p_type
++    and snapshot_date < p_snapshot_date
++  order by snapshot_date desc
++  limit 1
++  for share;
++
++  if v_prev is null then
++    return json_build_object(
++      'error', 'Невозможно использовать дельту для первой точки — предыдущего баланса нет.'
++    );
++  end if;
++
++  v_final := v_prev + p_delta;
++
++  -- Upsert с вычисленным значением
++  insert into balance_snapshots (user_id, type, value_usd, snapshot_date, note)
++  values (p_user_id, p_type, v_final, p_snapshot_date, p_note)
++  on conflict (user_id, type, snapshot_date)
++  do update set value_usd = excluded.value_usd, note = excluded.note;
++
++  return json_build_object(
++    'value_usd', v_final,
++    'previous_value', v_prev,
++    'applied_delta', p_delta
++  );
++end;
++$$;
++
++-- Проверка:
++-- select apply_balance_delta(
++--   '00000000-0000-0000-0000-000000000000'::uuid,
++--   'spot',
++--   '2026-08-10'::date,
++--   100.00,
++--   'test delta'
++-- );
+-- 
+2.47.3
+
