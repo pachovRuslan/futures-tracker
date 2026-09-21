@@ -22,7 +22,7 @@ const envAdminEmails = (process.env.ADMIN_EMAILS ?? "")
 const CRON_PATH = "/api/sync/cron";
 
 export async function middleware(request: NextRequest) {
-  // Публичные пути — логин, OAuth callback, страница отказа,静态 assets.
+  // Публичные пути — логин, OAuth callback, страница отказа, статичные assets.
   const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error", "/not-allowed"];
   if (publicPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
     return NextResponse.next();
