@@ -1,0 +1,179 @@
+--- a/middleware.ts
++++ b/middleware.ts
+@@ -22,6 +22,25 @@
+ const CRON_PATH = "/api/sync/cron";
+ 
+ export async function middleware(request: NextRequest) {
++  // Мобильное приложение (Expo) авторизуется не cookie-сессией, а заголовком
++  // Authorization: Bearer <supabase JWT>. Такие API-запросы middleware
++  // не прогоняет через cookie-проверку — роуты сами авторизуют юзера
++  // по JWT (getUser + RLS).
++  //
++  // ⚠️ /api/admin/* сюда НЕ входит — админка доступна только с сайта
++  // (cookie-сессия + requireAdmin внутри роутов).
++  // ⚠️ /api/sync/cron уже пропущен выше (CRON_SECRET).
++  // Cookie-less GET /api/* без Bearer по-прежнему уводится на /login
++  // (старое поведение для браузеров и curl).
++  const authHeader = request.headers.get("authorization");
++  if (
++    request.nextUrl.pathname.startsWith("/api/") &&
++    !request.nextUrl.pathname.startsWith("/api/admin") &&
++    authHeader?.startsWith("Bearer ")
++  ) {
++    return NextResponse.next();
++  }
++
+   // Публичные пути — логин, OAuth callback, страница отказа, статичные assets.
+   const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error", "/not-allowed"];
+   if (publicPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
+--- a/lib/supabase-server.ts
++++ b/lib/supabase-server.ts
+@@ -1,4 +1,6 @@
+ import { cookies } from "next/headers";
++import type { NextRequest } from "next/server";
++import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+ import { createServerClient, type CookieOptions } from "@supabase/ssr";
+ 
+ export async function createServerSupabaseClient() {
+@@ -26,3 +28,30 @@
+     }
+   );
+ }
++
++/**
++ * Supabase-клиент для API-роутов: Bearer-JWT (мобильное приложение)
++ * или cookie-сессия (браузер).
++ *
++ * Мобильное приложение Expo шлёт Authorization: Bearer <access token>
++ * вместо cookie-сессии сайта. Если заголовок есть — создаём клиент
++ * с этим JWT: supabase.auth.getUser() валидирует токен на сервере
++ * Supabase, а RLS (auth.uid()) работает как у обычного юзера.
++ *
++ * Нет заголовка — обычный cookie-клиент (сайт, Server Components).
++ */
++export async function createApiSupabaseClient(
++  req: NextRequest
++): Promise<SupabaseClient> {
++  const authHeader = req.headers.get("authorization");
++  if (authHeader?.startsWith("Bearer ")) {
++    return createClient(
++      process.env.NEXT_PUBLIC_SUPABASE_URL!,
++      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
++      {
++        global: { headers: { Authorization: authHeader } },
++      }
++    );
++  }
++  return createServerSupabaseClient();
++}
+--- a/lib/auth.ts
++++ b/lib/auth.ts
+@@ -1,5 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createServerSupabaseClient } from "@/lib/supabase-server";
++import { createClient } from "@supabase/supabase-js";
+ import crypto from "crypto";
+ 
+ export type SyncAuth =
+@@ -25,8 +26,10 @@
+  *   1. Vercel cron — заголовок `Authorization: Bearer $CRON_SECRET`, который
+  *      Vercel автоматически шлёт при запуске cron-задач. В этом режиме
+  *      синкаются ВСЕ подключения всех пользователей (cron не имеет сессии).
+- *   2. Залогиненный пользователь — ручной запуск с дашборда. В этом режиме
+- *      синкается ТОЛЬКО подключение этого пользователя.
++ *   2. Bearer-JWT мобильного приложения (Expo) — токен Supabase Access Token.
++ *      В этом режиме синкается ТОЛЬКО подключение этого пользователя.
++ *   3. Залогиненный пользователь (cookie-сессия сайта) — ручной запуск
++ *      с дашборда. В этом режиме синкается ТОЛЬКО подключение этого юзера.
+  *
+  * Любой другой запрос получает 401. Раньше sync-роуты были полностью
+  * публичными — любой, кто знал URL, мог дёргать синк и забивать rate-limit
+@@ -38,16 +41,35 @@
+ export async function authenticateSyncRequest(
+   req: NextRequest
+ ): Promise<SyncAuth> {
++  const authHeader = req.headers.get("authorization");
++
+   // 1. Vercel cron — timing-safe сравнение секрета
+   const cronSecret = process.env.CRON_SECRET;
+-  if (cronSecret) {
+-    const authHeader = req.headers.get("authorization");
+-    if (authHeader && safeEqual(authHeader, `Bearer ${cronSecret}`)) {
++  if (cronSecret && authHeader) {
++    if (safeEqual(authHeader, `Bearer ${cronSecret}`)) {
+       return { mode: "cron" };
+     }
+   }
+ 
+-  // 2. Пользовательская сессия (ручной запуск)
++  // 2. Bearer-JWT мобильного приложения — валидируем токен на сервере
++  //    Supabase. Проверяем ДО cookie-ветки: если заголовок есть, юзер
++  //    точно не браузер. Невалидный JWT → 401 без fallback на cookie.
++  if (authHeader?.startsWith("Bearer ")) {
++    const mobile = createClient(
++      process.env.NEXT_PUBLIC_SUPABASE_URL!,
++      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
++      { global: { headers: { Authorization: authHeader } } }
++    );
++    const {
++      data: { user },
++    } = await mobile.auth.getUser();
++    if (!user) {
++      return { error: NextResponse.json({ error: "Не авторизован" }, { status: 401 }) };
++    }
++    return { mode: "user", userId: user.id };
++  }
++
++  // 3. Пользовательская сессия (ручной запуск с сайта)
+   const supabase = await createServerSupabaseClient();
+   const {
+     data: { user },
+--- a/app/api/connections/route.ts
++++ b/app/api/connections/route.ts
+@@ -1,14 +1,14 @@
+ import { NextRequest, NextResponse } from "next/server";
+-import { createServerSupabaseClient } from "@/lib/supabase-server";
++import { createApiSupabaseClient } from "@/lib/supabase-server";
+ import { encrypt, maskKey } from "@/lib/crypto";
+ import { REGISTRY, EXCHANGES } from "@/lib/exchanges";
+ import { ConnectionInput } from "@/lib/validation";
+ 
+ // Список подключений — специально выбираем только безопасные колонки.
+ // Даже случайно не отдадим *_encrypted наружу.
+-export async function GET() {
++export async function GET(req: NextRequest) {
+   try {
+-    const supabase = await createServerSupabaseClient();
++    const supabase = await createApiSupabaseClient(req);
+     const {
+       data: { user },
+     } = await supabase.auth.getUser();
+@@ -35,7 +35,7 @@
+ // запросом к бирже, и только если он рабочий, шифруем и сохраняем.
+ export async function POST(req: NextRequest) {
+   try {
+-    const supabase = await createServerSupabaseClient();
++    const supabase = await createApiSupabaseClient(req);
+     const {
+       data: { user },
+     } = await supabase.auth.getUser();
+--- a/app/api/connections/[exchange]/route.ts
++++ b/app/api/connections/[exchange]/route.ts
+@@ -1,13 +1,13 @@
+ import { NextRequest, NextResponse } from "next/server";
+-import { createServerSupabaseClient } from "@/lib/supabase-server";
++import { createApiSupabaseClient } from "@/lib/supabase-server";
+ 
+ export async function DELETE(
+-  _req: NextRequest,
++  req: NextRequest,
+   { params }: { params: Promise<{ exchange: string }> }
+ ) {
+   try {
+     const { exchange } = await params;
+-    const supabase = await createServerSupabaseClient();
++    const supabase = await createApiSupabaseClient(req);
+     const {
+       data: { user },
+     } = await supabase.auth.getUser();
+     

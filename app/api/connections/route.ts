@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabaseClient } from "@/lib/supabase-server";
+import { createApiSupabaseClient } from "@/lib/supabase-server";
 import { encrypt, maskKey } from "@/lib/crypto";
 import { REGISTRY, EXCHANGES } from "@/lib/exchanges";
 import { ConnectionInput } from "@/lib/validation";
 
 // Список подключений — специально выбираем только безопасные колонки.
 // Даже случайно не отдадим *_encrypted наружу.
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const supabase = await createServerSupabaseClient();
+    const supabase = await createApiSupabaseClient(req);
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -35,7 +35,7 @@ export async function GET() {
 // запросом к бирже, и только если он рабочий, шифруем и сохраняем.
 export async function POST(req: NextRequest) {
   try {
-    const supabase = await createServerSupabaseClient();
+    const supabase = await createApiSupabaseClient(req);
     const {
       data: { user },
     } = await supabase.auth.getUser();

@@ -22,6 +22,25 @@ const envAdminEmails = (process.env.ADMIN_EMAILS ?? "")
 const CRON_PATH = "/api/sync/cron";
 
 export async function middleware(request: NextRequest) {
+  // Мобильное приложение (Expo) авторизуется не cookie-сессией, а заголовком
+  // Authorization: Bearer <supabase JWT>. Такие API-запросы middleware
+  // не прогоняет через cookie-проверку — роуты сами авторизуют юзера
+  // по JWT (getUser + RLS).
+  //
+  // ⚠️ /api/admin/* сюда НЕ входит — админка доступна только с сайта
+  // (cookie-сессия + requireAdmin внутри роутов).
+  // ⚠️ /api/sync/cron уже пропущен выше (CRON_SECRET).
+  // Cookie-less GET /api/* без Bearer по-прежнему уводится на /login
+  // (старое поведение для браузеров и curl).
+  const authHeader = request.headers.get("authorization");
+  if (
+    request.nextUrl.pathname.startsWith("/api/") &&
+    !request.nextUrl.pathname.startsWith("/api/admin") &&
+    authHeader?.startsWith("Bearer ")
+  ) {
+    return NextResponse.next();
+  }
+
   // Публичные пути — логин, OAuth callback, страница отказа, статичные assets.
   const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error", "/not-allowed"];
   if (publicPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
