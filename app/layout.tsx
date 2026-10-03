@@ -74,8 +74,8 @@ export default async function RootLayout({
                 <Image
                   src="/logo.png"
                   alt="Futures Tracker"
-                  width={38}
-                  height={24}
+                  width={64}
+                  height={64}
                   priority
                   className="shrink-0"
                 />
