@@ -69,14 +69,18 @@ export default async function RootLayout({
         <ThemeProvider>
           <div className="min-h-screen flex flex-col">
             <header className="border-b border-[var(--color-border)] px-4 sm:px-6 py-3 flex items-center justify-between sticky top-0 bg-[var(--color-bg)]/80 backdrop-blur-md z-10">
-              {/* Логотип + название */}
-              <div className="flex items-center gap-2">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" className="text-[var(--color-profit)]">
-                  <path d="M3 17l5-5 4 4 8-8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M14 8h6v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                <span className="font-mono-tabular text-sm tracking-wide text-[var(--color-text-muted)] hidden sm:inline">
-                  FUTURES_TRACKER
+              {/* Логотип + название (как в приложении: FUTURES_ белым, TRACKER акцентом) */}
+              <div className="flex items-center gap-2.5">
+                <Image
+                  src="/logo.png"
+                  alt="Futures Tracker"
+                  width={38}
+                  height={24}
+                  priority
+                  className="shrink-0"
+                />
+                <span className="hidden sm:inline text-base font-extrabold tracking-[0.08em] leading-none text-[var(--color-text)]">
+                  FUTURES_<span className="text-[var(--color-accent)]">TRACKER</span>
                 </span>
               </div>
 

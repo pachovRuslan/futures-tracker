@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { createBrowserSupabaseClient } from "@/lib/supabase-browser";
 
 export default function LoginPage() {
@@ -17,14 +18,17 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center px-4">
       <div className="card flex flex-col items-center gap-6 px-8 sm:px-12 py-10 sm:py-14 max-w-sm w-full">
         {/* Логотип */}
-        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" className="text-[var(--color-profit)]">
-          <path d="M3 17l5-5 4 4 8-8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M14 8h6v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <Image
+          src="/logo.png"
+          alt="Futures Tracker"
+          width={102}
+          height={64}
+          priority
+        />
 
         <div className="flex flex-col items-center gap-1">
-          <div className="font-mono-tabular text-sm tracking-widest uppercase text-[var(--color-text-muted)]">
-            Futures Tracker
+          <div className="text-xl font-extrabold tracking-[0.08em] leading-none text-[var(--color-text)]">
+            FUTURES_<span className="text-[var(--color-accent)]">TRACKER</span>
           </div>
           <div className="text-xs text-[var(--color-text-faint)] text-center">
             Личный трекер фьючерсных сделок
