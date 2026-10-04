@@ -42,7 +42,17 @@ export async function middleware(request: NextRequest) {
   }
 
   // Публичные пути — логин, OAuth callback, страница отказа, статичные assets.
-  const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error", "/not-allowed"];
+  // /privacy и /terms — публичные юридические страницы (требование Google Play
+  // Data safety и App Review 5.1.1): стор должен уметь их открыть без логина
+  // и без allowlist.
+  const publicPaths = [
+    "/login",
+    "/auth/callback",
+    "/auth/auth-code-error",
+    "/not-allowed",
+    "/privacy",
+    "/terms",
+  ];
   if (publicPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
     return NextResponse.next();
   }

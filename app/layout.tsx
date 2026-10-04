@@ -133,6 +133,17 @@ export default async function RootLayout({
               </nav>
             </header>
             <main className="flex-1 px-4 sm:px-6 py-6 sm:py-8">{children}</main>
+            <footer className="px-4 sm:px-6 py-4 border-t border-[var(--color-border)] flex items-center justify-between text-xs text-[var(--color-text-faint)]">
+              <span>Futures Tracker</span>
+              <span className="flex items-center gap-4">
+                <Link href="/privacy" className="hover:text-[var(--color-accent)] transition-colors">
+                  Политика конфиденциальности
+                </Link>
+                <Link href="/terms" className="hover:text-[var(--color-accent)] transition-colors">
+                  Условия использования
+                </Link>
+              </span>
+            </footer>
           </div>
         </ThemeProvider>
       </body>
