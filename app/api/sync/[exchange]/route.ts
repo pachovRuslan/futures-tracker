@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateSyncRequest } from "@/lib/auth";
+import { isMobileRequest, isPremiumUser, premiumRequiredResponse } from "@/lib/entitlements";
+import { getSupabaseServerClient } from "@/lib/supabase";
 import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
 import { REGISTRY, isValidExchange } from "@/lib/exchanges";
 
@@ -33,6 +35,18 @@ export async function GET(
 
     const auth = await authenticateSyncRequest(req);
     if ("error" in auth) return auth.error;
+
+    // Премиум-гейт для МОБИЛЬНЫХ запросов (Bearer JWT): авто-синк —
+    // платная фича мобилки, раньше FREE-юзер мог дёргать его curl'ом
+    // с валидным JWT. Cron и cookie-сессии сайта не гейтятся: сайт
+    // закрыт allowlist-middleware'ом целиком.
+    if (auth.mode === "user" && isMobileRequest(req)) {
+      const premium = await isPremiumUser(
+        getSupabaseServerClient(),
+        auth.userId,
+      );
+      if (!premium) return premiumRequiredResponse();
+    }
 
     const targets = await getSyncTargets(exchange, auth);
     if (targets.length === 0) {

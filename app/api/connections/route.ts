@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createApiSupabaseClient } from "@/lib/supabase-server";
+import { isMobileRequest, isPremiumUser, premiumRequiredResponse } from "@/lib/entitlements";
 import { encrypt, maskKey } from "@/lib/crypto";
 import { REGISTRY, EXCHANGES } from "@/lib/exchanges";
 import { ConnectionInput } from "@/lib/validation";
@@ -40,6 +41,14 @@ export async function POST(req: NextRequest) {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+
+    // Премиум-гейт для МОБИЛЬНЫХ запросов (Bearer JWT): подключения бирж —
+    // платная фича мобилки. Cookie-сессию сайта не гейтим — он за
+    // allowlist-middleware, его юзеры и так «клуб».
+    if (isMobileRequest(req)) {
+      const premium = await isPremiumUser(supabase, user.id, user.email);
+      if (!premium) return premiumRequiredResponse();
+    }
 
     const parsed = ConnectionInput.safeParse(await req.json());
     if (!parsed.success) {
