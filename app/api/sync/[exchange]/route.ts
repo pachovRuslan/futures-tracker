@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateSyncRequest } from "@/lib/auth";
 import { isMobileRequest, isPremiumUser, premiumRequiredResponse } from "@/lib/entitlements";
 import { getSupabaseServerClient } from "@/lib/supabase";
-import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
+import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults, getCronSyncDays } from "@/lib/sync";
 import { REGISTRY, isValidExchange } from "@/lib/exchanges";
 
 export const maxDuration = 60;
@@ -15,7 +15,10 @@ export const maxDuration = 60;
  *   - Залогиненный пользователь — синкаем ТОЛЬКО его подключение
  *
  * Параметры:
- *   - days: на сколько дней назад копать (по умолчанию 365)
+ *   - days: на сколько дней назад копать. User-режим (ручная кнопка
+ *     на сайте/в приложении) — по умолчанию 365. Cron-режим без явного
+ *     days — инкрементальное окно getCronSyncDays() (см. lib/sync.ts):
+ *     полный год по ВСЕМ юзерам не влезает в maxDuration=60.
  */
 export async function GET(
   req: NextRequest,
@@ -61,8 +64,13 @@ export async function GET(
       });
     }
 
-    const daysParam = req.nextUrl.searchParams.get("days");
-    const days = daysParam ? Number(daysParam) : 365;
+    const daysParam = Number(req.nextUrl.searchParams.get("days"));
+    const days =
+      Number.isFinite(daysParam) && daysParam >= 1
+        ? Math.floor(daysParam)
+        : auth.mode === "cron"
+          ? getCronSyncDays()
+          : 365;
     const now = Date.now();
     const sinceMs = now - days * 24 * 60 * 60 * 1000;
 

@@ -1,0 +1,135 @@
+diff --git a/.env.example b/.env.example
+index 331f887..04a9243 100644
+--- a/.env.example
++++ b/.env.example
+@@ -54,6 +54,13 @@ BITUNIX_SYMBOLS=
+ # Оставь пустым ТОЛЬКО для локальной разработки (на проде обязателен).
+ CRON_SECRET=
+ 
++# Окно инкрементального cron-синка в днях (по умолчанию 7).
++# Ночной крон тянет только последние N дней, а не 365: полный год по всем
++# юзерам — сотни последовательных запросов к биржам, которые не влезают в
++# 60-секундный лимит функций на Hobby (FUNCTION_INVOCATION_TIMEOUT).
++# Ручной синк кнопкой по-прежнему тянет 365 дней (но для одного юзера).
++# CRON_SYNC_DAYS=7
++
+ # RevenueCat — верификация Premium-подписок, купленных в мобильном
+ # приложении. Секретный ключ v1 API (sk_...) из RevenueCat Dashboard →
+ # Project Settings → API Keys. Используется ТОЛЬКО сервером в
+diff --git a/app/api/sync/[exchange]/route.ts b/app/api/sync/[exchange]/route.ts
+index 4ec5e03..47c62f8 100644
+--- a/app/api/sync/[exchange]/route.ts
++++ b/app/api/sync/[exchange]/route.ts
+@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
+ import { authenticateSyncRequest } from "@/lib/auth";
+ import { isMobileRequest, isPremiumUser, premiumRequiredResponse } from "@/lib/entitlements";
+ import { getSupabaseServerClient } from "@/lib/supabase";
+-import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
++import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults, getCronSyncDays } from "@/lib/sync";
+ import { REGISTRY, isValidExchange } from "@/lib/exchanges";
+ 
+ export const maxDuration = 60;
+@@ -15,7 +15,10 @@ export const maxDuration = 60;
+  *   - Залогиненный пользователь — синкаем ТОЛЬКО его подключение
+  *
+  * Параметры:
+- *   - days: на сколько дней назад копать (по умолчанию 365)
++ *   - days: на сколько дней назад копать. User-режим (ручная кнопка
++ *     на сайте/в приложении) — по умолчанию 365. Cron-режим без явного
++ *     days — инкрементальное окно getCronSyncDays() (см. lib/sync.ts):
++ *     полный год по ВСЕМ юзерам не влезает в maxDuration=60.
+  */
+ export async function GET(
+   req: NextRequest,
+@@ -61,8 +64,13 @@ export async function GET(
+       });
+     }
+ 
+-    const daysParam = req.nextUrl.searchParams.get("days");
+-    const days = daysParam ? Number(daysParam) : 365;
++    const daysParam = Number(req.nextUrl.searchParams.get("days"));
++    const days =
++      Number.isFinite(daysParam) && daysParam >= 1
++        ? Math.floor(daysParam)
++        : auth.mode === "cron"
++          ? getCronSyncDays()
++          : 365;
+     const now = Date.now();
+     const sinceMs = now - days * 24 * 60 * 60 * 1000;
+ 
+diff --git a/app/api/sync/cron/route.ts b/app/api/sync/cron/route.ts
+index 8e3314b..00ca6b6 100644
+--- a/app/api/sync/cron/route.ts
++++ b/app/api/sync/cron/route.ts
+@@ -1,6 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { authenticateSyncRequest } from "@/lib/auth";
+-import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
++import { getCronSyncDays, getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
+ import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
+ 
+ export const maxDuration = 60;
+@@ -10,6 +10,11 @@ export const maxDuration = 60;
+  * Обходит ВСЕ биржи последовательно.
+  *
+  * Авторизация: только Vercel cron (Bearer $CRON_SECRET).
++ *
++ * ⚠️ Окно ИНКРЕМЕНТАЛЬНОЕ (CRON_SYNC_DAYS, по умолчанию 7 дней), а не 365:
++ * год по всем юзерам = сотни последовательных запросов к биржам и не
++ * влезает в maxDuration=60 Hobby-плана (FUNCTION_INVOCATION_TIMEOUT).
++ * Полная история подтягивается ручной кнопкой синка (user-режим, 365 дней).
+  */
+ export async function GET(req: NextRequest) {
+   try {
+@@ -23,7 +28,7 @@ export async function GET(req: NextRequest) {
+     }
+ 
+     const now = Date.now();
+-    const sinceMs = now - 365 * 24 * 60 * 60 * 1000;
++    const sinceMs = now - getCronSyncDays() * 24 * 60 * 60 * 1000;
+     const allResults: { exchange: string; processed: number; succeeded: number; failed: number; upserted: number; errors: { userId: string; error: string }[] }[] = [];
+ 
+     for (const exchange of EXCHANGES) {
+@@ -49,7 +54,7 @@ export async function GET(req: NextRequest) {
+ 
+     const totalUpserted = allResults.reduce((acc, r) => acc + r.upserted, 0);
+     const totalFailed = allResults.reduce((acc, r) => acc + r.failed, 0);
+-    console.log(`[cron] done: ${totalUpserted} upserted, ${totalFailed} failed across ${EXCHANGES.length} exchanges`);
++    console.log(`[cron] done: ${totalUpserted} upserted, ${totalFailed} failed across ${EXCHANGES.length} exchanges (window: ${getCronSyncDays()}d)`);
+ 
+     return NextResponse.json({
+       ok: totalFailed === 0,
+diff --git a/lib/sync.ts b/lib/sync.ts
+index a5706e1..fe8dde5 100644
+--- a/lib/sync.ts
++++ b/lib/sync.ts
+@@ -224,3 +224,29 @@ export function summarizeResults(results: SyncUserResult[]): {
+       .map((r) => ({ userId: r.userId, error: r.error! })),
+   };
+ }
++
++// ============================================================
++// getCronSyncDays — окно инкрементального cron-синка
++// ============================================================
++
++/**
++ * Cron-синк тянет только последние N дней (env CRON_SYNC_DAYS,
++ * по умолчанию 7). Причина: полный год по ВСЕМ юзерам — это сотни
++ * последовательных HTTP-запросов к бирже (bybit: ~52 семидневных
++ * окна × 8 подключений), которые НЕ влезают в maxDuration=60 на
++ * Hobby-плане → Vercel убивает функцию (FUNCTION_INVOCATION_TIMEOUT).
++ *
++ * Ручной синк (кнопка «Синк всё» на сайте / «Синк все биржи» в
++ * приложении) работает в user-режиме с ОДНИМ юзером и продолжает
++ * тянуть 365 дней — это ~15-25 секунд, в лимит влезает. Первичное
++ * наполнение истории при добавлении нового подключения происходит
++ * именно ручной кнопкой, крон только поддерживает свежесть.
++ *
++ * Окно 7 дней самовосстанавливается: если крон пропустил до 6 ночей
++ * подряд (деплой, даунтайм), следующая ночь доберёт всё пропущенное —
++ * upsert по (user_id, exchange, external_id) идемпотентен.
++ */
++export function getCronSyncDays(): number {
++  const n = Number(process.env.CRON_SYNC_DAYS ?? "7");
++  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 7;
++}

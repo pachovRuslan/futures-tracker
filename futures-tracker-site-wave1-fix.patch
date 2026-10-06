@@ -1,0 +1,979 @@
+From 2772ab4749a6bcf16ea946affec04e2b0406354c Mon Sep 17 00:00:00 2001
+From: FT Wave1 <wave1@futures-tracker.app>
+Date: Sun, 4 Oct 2026 22:40:12 +0000
+Subject: [PATCH 1/4] =?UTF-8?q?feat(db):=20=D1=81=D0=B5=D1=80=D0=B2=D0=B5?=
+ =?UTF-8?q?=D1=80=D0=BD=D1=8B=D0=B9=20FREE-=D0=BB=D0=B8=D0=BC=D0=B8=D1=82?=
+ =?UTF-8?q?=2050=20=D1=81=D0=B4=D0=B5=D0=BB=D0=BE=D0=BA=20+=20RPC=20=D1=83?=
+ =?UTF-8?q?=D0=B4=D0=B0=D0=BB=D0=B5=D0=BD=D0=B8=D1=8F=20=D0=B0=D0=BA=D0=BA?=
+ =?UTF-8?q?=D0=B0=D1=83=D0=BD=D1=82=D0=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Лимит 50 сделок для FREE-плана проверялся только на клиенте мобилки —
+deep link или прямой POST в Supabase REST (/rest/v1/trades) обходил его
+(RLS проверяет лишь user_id). Теперь BEFORE INSERT-триггер дублирует
+лимит в БД: RLS пропускает вставку, триггер отклоняет с ошибкой
+FREE_TRADE_LIMIT_REACHED (errcode 23514), которую мобилка ловит и
+показывает пейволл.
+
+«Эффективный премиум» (ft_is_effective_premium) = is_premium (не истек)
+ИЛИ is_allowlisted ИЛИ email в allowed_emails. Последние два условия
+обязательны, чтобы не сломать сайт: его юзеры вставляют сделки через
+cookie-сессию, а строки в user_entitlements у большинства из них нет.
+Серверный синк (service_role, auth.uid() IS NULL) лимитом не касается.
+
+delete_my_account() — SECURITY DEFINER RPC для требования Google Play
+Account Deletion / App Review 5.1.1(v): удаляет юзера из auth.users,
+данные во всех таблицах сносятся ON DELETE CASCADE.
+---
+ ...ion_10_free_limit_and_account_deletion.sql | 157 ++++++++++++++++++
+ 1 file changed, 157 insertions(+)
+ create mode 100644 supabase/migration_10_free_limit_and_account_deletion.sql
+
+diff --git a/supabase/migration_10_free_limit_and_account_deletion.sql b/supabase/migration_10_free_limit_and_account_deletion.sql
+new file mode 100644
+index 0000000..7092b15
+--- /dev/null
++++ b/supabase/migration_10_free_limit_and_account_deletion.sql
+@@ -0,0 +1,157 @@
++-- ============================================================
++-- Миграция 10: серверный FREE-лимит 50 сделок + удаление аккаунта
++-- ============================================================
++-- Контекст (аудит мобильного приложения, волна 1):
++--
++--   1) Лимит «FREE = до 50 сделок» раньше проверялся ТОЛЬКО на
++--      клиенте мобилки. Deep link futurestracker://trade/new или
++--      прямой POST в Supabase REST (/rest/v1/trades) с валидным JWT
++--      обходили его — RLS-политика проверяет лишь user_id. Теперь
++--      лимит дублируется BEFORE INSERT-триггером в самой БД.
++--
++--   2) Для публикации в Google Play / App Store обязателен механизм
++--      удаления аккаунта из приложения. RPC delete_my_account()
++--      удаляет пользователя из auth.users — данные (trades,
++--      user_entitlements, balance_snapshots, exchange_connections)
++--      сносятся каскадом: у всех FK уже есть ON DELETE CASCADE.
++--      monthly_summary — вьюха, данных не хранит.
++--
++-- Выполнить в Supabase Dashboard → SQL Editor. Идемпотентно.
++
++-- ─────────────────────────────────────────────────────────────
++-- 1. «Эффективный премиум» — единая функция-источник правды
++-- ─────────────────────────────────────────────────────────────
++-- Премиум = любое из:
++--   a) user_entitlements.is_premium = true И подписка не истекла
++--      (expires_at IS NULL = бессрочно);
++--   b) user_entitlements.is_allowlisted = true — юзер из allowlist
++--      сайта: он и так имел полный доступ до freemium-модели;
++--   c) email юзера есть в таблице allowed_emails — web-allowlist:
++--      строка в user_entitlements у большинства юзеров сайта
++--      никогда не создавалась.
++--
++-- ВАЖНО: без пунктов (b)/(c) триггер сломал бы САЙТ: его
++-- пользователи вставляют сделки через cookie-сессию (RLS,
++-- auth.uid() установлен), и лимит 50 применялся бы к ним.
++
++create or replace function public.ft_is_effective_premium(p_user_id uuid)
++returns boolean
++language sql
++stable
++security definer
++set search_path = public
++as $$
++  select
++    coalesce(
++      (
++        select e.is_premium and (e.expires_at is null or e.expires_at > now())
++        from public.user_entitlements e
++        where e.user_id = p_user_id
++      ),
++      false
++    )
++    or coalesce(
++      (
++        select e.is_allowlisted
++        from public.user_entitlements e
++        where e.user_id = p_user_id
++      ),
++      false
++    )
++    or exists (
++      select 1
++      from public.allowed_emails a
++      join auth.users u on lower(u.email) = lower(a.email)
++      where u.id = p_user_id
++    );
++$$;
++
++revoke all on function public.ft_is_effective_premium(uuid) from public, anon;
++grant execute on function public.ft_is_effective_premium(uuid) to authenticated;
++
++-- ─────────────────────────────────────────────────────────────
++-- 2. Триггер FREE-лимита на public.trades
++-- ─────────────────────────────────────────────────────────────
++
++create or replace function public.enforce_free_trade_limit()
++returns trigger
++language plpgsql
++security definer
++set search_path = public
++as $$
++declare
++  v_count integer;
++begin
++  -- Серверный синк бирж (cron + ручной запуск с сайта) пишет через
++  -- service_role: auth.uid() = null, лимит его не касается. Синк и
++  -- так премиум-фича — для мобильных запросов он гейтится в API
++  -- (402 PREMIUM_REQUIRED в /api/sync/[exchange]).
++  if auth.uid() is null then
++    return new;
++  end if;
++
++  if public.ft_is_effective_premium(auth.uid()) then
++    return new;
++  end if;
++
++  select count(*) into v_count
++  from public.trades t
++  where t.user_id = auth.uid();
++
++  -- 50 = FREE_TRADE_LIMIT в мобилке (src/shared/config.ts).
++  -- Менять значение — синхронно в обоих местах.
++  if v_count >= 50 then
++    raise exception 'FREE_TRADE_LIMIT_REACHED: бесплатный план позволяет вести до 50 сделок. Оформите Premium в приложении.'
++      using errcode = '23514';
++  end if;
++
++  return new;
++end;
++$$;
++
++revoke all on function public.enforce_free_trade_limit() from public, anon;
++grant execute on function public.enforce_free_trade_limit() to authenticated;
++
++drop trigger if exists trg_trades_free_limit on public.trades;
++create trigger trg_trades_free_limit
++  before insert on public.trades
++  for each row execute function public.enforce_free_trade_limit();
++
++-- ─────────────────────────────────────────────────────────────
++-- 3. Удаление аккаунта самим пользователем
++--    (Google Play Account Deletion policy / App Review 5.1.1(v))
++-- ─────────────────────────────────────────────────────────────
++
++create or replace function public.delete_my_account()
++returns jsonb
++language plpgsql
++security definer
++set search_path = public, auth
++as $$
++declare
++  v_uid uuid := auth.uid();
++begin
++  if v_uid is null then
++    raise exception 'NOT_AUTHENTICATED'
++      using errcode = '42501';
++  end if;
++
++  -- Зависимые таблицы снесёт ON DELETE CASCADE от auth.users.
++  -- Порядок: сначала публичные данные (через каскад), затем сам юзер.
++  delete from auth.users where id = v_uid;
++
++  return jsonb_build_object('ok', true, 'deleted_at', now());
++end;
++$$;
++
++revoke all on function public.delete_my_account() from public, anon, authenticated;
++grant execute on function public.delete_my_account() to authenticated;
++
++-- ─────────────────────────────────────────────────────────────
++-- 4. Самопроверка после выполнения (раскомментировать при желании)
++-- ─────────────────────────────────────────────────────────────
++-- select
++--   exists(select 1 from pg_trigger where tgname = 'trg_trades_free_limit') as trigger_ok,
++--   exists(select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
++--          where n.nspname = 'public' and p.proname in
++--            ('ft_is_effective_premium','delete_my_account')) as functions_ok;
+-- 
+2.47.3
+
+
+From f9a5118bd3b7e8efca398cfa803c68c7a5341b66 Mon Sep 17 00:00:00 2001
+From: FT Wave1 <wave1@futures-tracker.app>
+Date: Sun, 4 Oct 2026 22:40:50 +0000
+Subject: [PATCH 2/4] =?UTF-8?q?feat(api):=20=D0=BF=D1=80=D0=B5=D0=BC=D0=B8?=
+ =?UTF-8?q?=D1=83=D0=BC-=D0=B3=D0=B5=D0=B9=D1=82=20connections=20=D0=B8=20?=
+ =?UTF-8?q?sync=20=D0=B4=D0=BB=D1=8F=20=D0=BC=D0=BE=D0=B1=D0=B8=D0=BB?=
+ =?UTF-8?q?=D1=8C=D0=BD=D1=8B=D1=85=20JWT-=D0=B7=D0=B0=D0=BF=D1=80=D0=BE?=
+ =?UTF-8?q?=D1=81=D0=BE=D0=B2?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Раньше POST /api/connections и GET /api/sync/[exchange] проверяли только
+авторизацию (JWT/cookie), но не entitlement — FREE-юзер мобилки мог
+подключать биржи и дёргать синк curl'ом, обходя пейволл.
+
+Теперь мобильные запросы (Authorization: Bearer) проходят проверку
+isPremiumUser: is_premium (не истек) ИЛИ is_allowlisted ИЛИ email в
+allowed_emails. Отказ — 402 { code: PREMIUM_REQUIRED }, мобилка по нему
+открывает пейволл.
+
+Cookie-сессии сайта и cron НЕ гейтятся: сайт целиком за allowlist-
+middleware, его юзеры и так имеют полный доступ — поведение веба не
+меняется (нулевая регрессия).
+---
+ app/api/connections/route.ts     |  9 ++++
+ app/api/sync/[exchange]/route.ts | 14 +++++
+ lib/entitlements.ts              | 91 ++++++++++++++++++++++++++++++++
+ 3 files changed, 114 insertions(+)
+ create mode 100644 lib/entitlements.ts
+
+diff --git a/app/api/connections/route.ts b/app/api/connections/route.ts
+index 13195ab..48fe5b7 100644
+--- a/app/api/connections/route.ts
++++ b/app/api/connections/route.ts
+@@ -1,5 +1,6 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { createApiSupabaseClient } from "@/lib/supabase-server";
++import { isMobileRequest, isPremiumUser, premiumRequiredResponse } from "@/lib/entitlements";
+ import { encrypt, maskKey } from "@/lib/crypto";
+ import { REGISTRY, EXCHANGES } from "@/lib/exchanges";
+ import { ConnectionInput } from "@/lib/validation";
+@@ -41,6 +42,14 @@ export async function POST(req: NextRequest) {
+     } = await supabase.auth.getUser();
+     if (!user) return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
+ 
++    // Премиум-гейт для МОБИЛЬНЫХ запросов (Bearer JWT): подключения бирж —
++    // платная фича мобилки. Cookie-сессию сайта не гейтим — он за
++    // allowlist-middleware, его юзеры и так «клуб».
++    if (isMobileRequest(req)) {
++      const premium = await isPremiumUser(supabase, user.id, user.email);
++      if (!premium) return premiumRequiredResponse();
++    }
++
+     const parsed = ConnectionInput.safeParse(await req.json());
+     if (!parsed.success) {
+       return NextResponse.json(
+diff --git a/app/api/sync/[exchange]/route.ts b/app/api/sync/[exchange]/route.ts
+index 7499de7..4ec5e03 100644
+--- a/app/api/sync/[exchange]/route.ts
++++ b/app/api/sync/[exchange]/route.ts
+@@ -1,5 +1,7 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { authenticateSyncRequest } from "@/lib/auth";
++import { isMobileRequest, isPremiumUser, premiumRequiredResponse } from "@/lib/entitlements";
++import { getSupabaseServerClient } from "@/lib/supabase";
+ import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
+ import { REGISTRY, isValidExchange } from "@/lib/exchanges";
+ 
+@@ -34,6 +36,18 @@ export async function GET(
+     const auth = await authenticateSyncRequest(req);
+     if ("error" in auth) return auth.error;
+ 
++    // Премиум-гейт для МОБИЛЬНЫХ запросов (Bearer JWT): авто-синк —
++    // платная фича мобилки, раньше FREE-юзер мог дёргать его curl'ом
++    // с валидным JWT. Cron и cookie-сессии сайта не гейтятся: сайт
++    // закрыт allowlist-middleware'ом целиком.
++    if (auth.mode === "user" && isMobileRequest(req)) {
++      const premium = await isPremiumUser(
++        getSupabaseServerClient(),
++        auth.userId,
++      );
++      if (!premium) return premiumRequiredResponse();
++    }
++
+     const targets = await getSyncTargets(exchange, auth);
+     if (targets.length === 0) {
+       return NextResponse.json({
+diff --git a/lib/entitlements.ts b/lib/entitlements.ts
+new file mode 100644
+index 0000000..2f3e990
+--- /dev/null
++++ b/lib/entitlements.ts
+@@ -0,0 +1,91 @@
++import type { NextRequest } from "next/server";
++import type { SupabaseClient } from "@supabase/supabase-js";
++
++/**
++ * Серверная проверка премиум-статуса для API-роутов.
++ *
++ * Дублирует SQL-функцию ft_is_effective_premium (миграция 10):
++ *   a) user_entitlements.is_premium = true и подписка не истекла
++ *      (expires_at NULL = бессрочно);
++ *   b) user_entitlements.is_allowlisted = true;
++ *   c) email юзера есть в allowed_emails (web-allowlist — у юзеров
++ *      сайта строка в user_entitlements часто не создавалась).
++ *
++ * Используется для гейта мобильных запросов (Bearer JWT) к премиум-фичам
++ * (/api/connections POST, /api/sync/[exchange]). Cookie-запросы сайта
++ * НЕ гейтятся: сайт закрыт allowlist-middleware'ом целиком, его юзеры
++ * и так имеют полный доступ.
++ */
++
++export const PREMIUM_REQUIRED_CODE = "PREMIUM_REQUIRED";
++
++export interface PremiumCheckResult {
++  premium: boolean;
++}
++
++/**
++ * Запрос пришёл от мобильного приложения (Bearer-JWT), а не от
++ * cookie-сессии сайта. Именно мобильная поверхность — freemium.
++ */
++export function isMobileRequest(req: NextRequest): boolean {
++  return req.headers.get("authorization")?.startsWith("Bearer ") ?? false;
++}
++
++/**
++ * Ответ 402 для FREE-юзера, дёрнувшего премиум-фичу с мобилки.
++ * Мобилка распознаёт код PREMIUM_REQUIRED и открывает пейволл.
++ */
++export function premiumRequiredResponse(): Response {
++  return Response.json(
++    {
++      error: PREMIUM_REQUIRED_CODE,
++      code: PREMIUM_REQUIRED_CODE,
++      message:
++        "Подключения бирж и авто-синк доступны по подписке Premium. Оформите её в приложении.",
++    },
++    { status: 402 },
++  );
++}
++
++/**
++ * Эффективный премиум-статус юзера.
++ *
++ * Клиент может быть любым: user-scoped (RLS пустит читать только свою
++ * строку user_entitlements и allowlist — обе политики это разрешают)
++ * или service-role.
++ */
++export async function isPremiumUser(
++  supabase: SupabaseClient,
++  userId: string,
++  email?: string | null,
++): Promise<boolean> {
++  const { data, error } = await supabase
++    .from("user_entitlements")
++    .select("is_premium, is_allowlisted, expires_at")
++    .eq("user_id", userId)
++    .maybeSingle();
++
++  if (error) {
++    console.error("[entitlements] user_entitlements read error:", error.message);
++  }
++
++  if (data) {
++    const active =
++      data.is_premium &&
++      (!data.expires_at || new Date(data.expires_at).getTime() > Date.now());
++    if (active || data.is_allowlisted) return true;
++  }
++
++  // Web-allowlist: юзеры сайта могли никогда не получить строку в
++  // user_entitlements — проверяем email напрямую.
++  if (email) {
++    const { data: allowed } = await supabase
++      .from("allowed_emails")
++      .select("email")
++      .eq("email", email.toLowerCase())
++      .maybeSingle();
++    if (allowed) return true;
++  }
++
++  return false;
++}
+-- 
+2.47.3
+
+
+From 9f9e2c7f0c36a1227d1cac5be06161da1d2072cf Mon Sep 17 00:00:00 2001
+From: FT Wave1 <wave1@futures-tracker.app>
+Date: Sun, 4 Oct 2026 22:41:51 +0000
+Subject: [PATCH 3/4] =?UTF-8?q?feat(api):=20POST=20/api/billing/sync-entit?=
+ =?UTF-8?q?lement=20=E2=80=94=20=D1=81=D0=B2=D0=B5=D1=80=D0=BA=D0=B0=20?=
+ =?UTF-8?q?=D0=BF=D0=BE=D0=B4=D0=BF=D0=B8=D1=81=D0=BA=D0=B8=20=D1=81=20Rev?=
+ =?UTF-8?q?enueCat?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Серверный мост между покупками в приложении (RevenueCat) и таблицей
+user_entitlements, из которой мобилка читает статус Premium.
+
+Мобилка вызывает эндпоинт с Bearer JWT после покупки/restore и при
+каждом запуске. Сервер сам спрашивает RC v1 API о подписке app_user_id
+(= supabase user id) — клиент не может «нарисовать» себе премиум.
+
+Активная подписка → upsert is_premium=true + expires_at + granted_by=
+'revenuecat:<store>'. Нет подписки → понижение ТОЛЬКО «покупного»
+премиума (granted_by LIKE 'revenuecat:%'): ручные выдачи и allowlist
+не трогаем. is_allowlisted при upsert сохраняется (обновляются только
+переданные колонки).
+
+Env: REVENUECAT_SECRET_API_KEY (sk_...), REVENUECAT_ENTITLEMENT_ID
+(default: premium) — добавлены в .env.example.
+---
+ .env.example                              |  10 ++
+ app/api/billing/sync-entitlement/route.ts | 176 ++++++++++++++++++++++
+ 2 files changed, 186 insertions(+)
+ create mode 100644 app/api/billing/sync-entitlement/route.ts
+
+diff --git a/.env.example b/.env.example
+index 5018ade..331f887 100644
+--- a/.env.example
++++ b/.env.example
+@@ -53,3 +53,13 @@ BITUNIX_SYMBOLS=
+ # Сгенерировать: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+ # Оставь пустым ТОЛЬКО для локальной разработки (на проде обязателен).
+ CRON_SECRET=
++
++# RevenueCat — верификация Premium-подписок, купленных в мобильном
++# приложении. Секретный ключ v1 API (sk_...) из RevenueCat Dashboard →
++# Project Settings → API Keys. Используется ТОЛЬКО сервером в
++# /api/billing/sync-entitlement — в бандл не попадает.
++REVENUECAT_SECRET_API_KEY=
++
++# Идентификатор entitlement в RevenueCat (Products → Entitlements).
++# Должен совпадать с максимальным идентификатором в дашборде RC.
++REVENUECAT_ENTITLEMENT_ID=premium
+diff --git a/app/api/billing/sync-entitlement/route.ts b/app/api/billing/sync-entitlement/route.ts
+new file mode 100644
+index 0000000..d9fffee
+--- /dev/null
++++ b/app/api/billing/sync-entitlement/route.ts
+@@ -0,0 +1,176 @@
++import { NextRequest, NextResponse } from "next/server";
++import { createApiSupabaseClient } from "@/lib/supabase-server";
++import { getSupabaseServerClient } from "@/lib/supabase";
++
++/**
++ * POST /api/billing/sync-entitlement — сверка подписки с RevenueCat.
++ *
++ * Вызывается мобильным приложением (Bearer JWT):
++ *   - после успешной покупки / восстановления покупок;
++ *   - при каждом запуске с залогиненным юзером (подтягивает продления
++ *     и отмены без webhook'ов).
++ *
++ * Схема: сервер сам спрашивает RevenueCat v1 API о подписке app_user_id
++ * (= supabase user id, мобилка делает Purchases.logIn(userId)), поэтому
++ * клиент не может «нарисовать» себе премиум — равно как и присланный
++ * receipt не нужен.
++ *
++ * Правила записи в user_entitlements:
++ *   - активная подписка → is_premium = true, expires_at, granted_by =
++ *     'revenuecat:<store>' (allowlist-колонки не трогаем);
++ *   - подписки нет → понижение ТОЛЬКО если премиум был выдан покупкой
++ *     (granted_by LIKE 'revenuecat:%'). Ручные выдачи админа и allowlist
++ *     сверка трогать не должна.
++ *
++ * Env:
++ *   REVENUECAT_SECRET_API_KEY — секретный ключ v1 (sk_...) из
++ *     RevenueCat Dashboard → Project Settings → API Keys.
++ *   REVENUECAT_ENTITLEMENT_ID — идентификатор entitlement (по умолчанию
++ *     «premium»).
++ */
++
++export const maxDuration = 30;
++
++const RC_V1_URL = "https://api.revenuecat.com/v1";
++
++interface RcEntitlementInfo {
++  expires_date: string | null;
++  product_identifier: string;
++}
++
++interface RcSubscriptionInfo {
++  store?: string;
++}
++
++interface RcSubscriberResponse {
++  subscriber?: {
++    entitlements?: Record<string, RcEntitlementInfo>;
++    subscriptions?: Record<string, RcSubscriptionInfo>;
++  };
++}
++
++export async function POST(req: NextRequest) {
++  try {
++    const secretKey = process.env.REVENUECAT_SECRET_API_KEY;
++    if (!secretKey) {
++      return NextResponse.json(
++        { error: "REVENUECAT_NOT_CONFIGURED", message: "REVENUECAT_SECRET_API_KEY не задан на сервере" },
++        { status: 503 },
++      );
++    }
++    const entitlementId = process.env.REVENUECAT_ENTITLEMENT_ID || "premium";
++
++    const supabase = await createApiSupabaseClient(req);
++    const {
++      data: { user },
++    } = await supabase.auth.getUser();
++    if (!user) {
++      return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
++    }
++
++    // ─── 1. Спрашиваем RevenueCat о подписке этого app_user_id ───────────
++    let rc: RcSubscriberResponse | null = null;
++    try {
++      const res = await fetch(`${RC_V1_URL}/subscribers/${user.id}`, {
++        headers: { Authorization: `Bearer ${secretKey}` },
++      });
++      // v1 GET /subscribers создаёт подписчика, если его нет, и почти
++      // всегда отвечает 200. Любой сбой сети/статус — «подписки нет».
++      if (res.ok) {
++        rc = (await res.json()) as RcSubscriberResponse;
++      }
++    } catch (err) {
++      console.error(
++        "[sync-entitlement] RevenueCat fetch error:",
++        err instanceof Error ? err.message : String(err),
++      );
++    }
++
++    const entitlement = rc?.subscriber?.entitlements?.[entitlementId];
++    const isActive = Boolean(
++      entitlement &&
++        (!entitlement.expires_date ||
++          new Date(entitlement.expires_date).getTime() > Date.now()),
++    );
++    const expiresAt = isActive && entitlement?.expires_date
++      ? entitlement.expires_date
++      : null;
++
++    const store =
++      entitlement?.product_identifier != null
++        ? rc?.subscriber?.subscriptions?.[entitlement.product_identifier]?.store
++        : undefined;
++
++    // ─── 2. Сверяем с текущей строкой user_entitlements ──────────────────
++    const svc = getSupabaseServerClient();
++    const { data: current, error: readError } = await svc
++      .from("user_entitlements")
++      .select("is_premium, is_allowlisted, expires_at, granted_by")
++      .eq("user_id", user.id)
++      .maybeSingle();
++    if (readError) throw readError;
++
++    const rcOwned = (current?.granted_by ?? "").startsWith("revenuecat");
++
++    if (isActive) {
++      const { error: upsertError } = await svc.from("user_entitlements").upsert(
++        {
++          user_id: user.id,
++          email: user.email ?? null,
++          is_premium: true,
++          expires_at: expiresAt,
++          granted_by: `revenuecat:${store ?? "unknown"}`,
++          granted_at: new Date().toISOString(),
++          note: "Подписка оформлена в приложении (RevenueCat)",
++        },
++        { onConflict: "user_id" },
++      );
++      // upsert обновляет только переданные колонки — is_allowlisted
++      // существующей строки сохраняется.
++      if (upsertError) throw upsertError;
++
++      return NextResponse.json({
++        premium: true,
++        expiresAt,
++        source: store ?? null,
++      });
++    }
++
++    // Подписки нет. Понижаем только «покупной» премиум: ручные выдачи
++    // (granted_by от админа) и allowlist остаются как есть.
++    if (rcOwned && current?.is_premium) {
++      const { error: updateError } = await svc
++        .from("user_entitlements")
++        .update({
++          is_premium: false,
++          note: "Подписка истекла или отменена (RevenueCat)",
++        })
++        .eq("user_id", user.id);
++      if (updateError) throw updateError;
++    }
++
++    // Текущий статус без RC: allowlisted-юзер или ручная выдача.
++    const stillPremium = Boolean(
++      current &&
++        (current.is_allowlisted ||
++          (current.is_premium &&
++            (!current.expires_at ||
++              new Date(current.expires_at).getTime() > Date.now()))),
++    );
++
++    return NextResponse.json({
++      premium: stillPremium,
++      expiresAt: current?.expires_at ?? null,
++      source: rcOwned ? "revenuecat:expired" : null,
++    });
++  } catch (err) {
++    console.error(
++      "sync-entitlement error:",
++      err instanceof Error ? err.message : String(err),
++    );
++    return NextResponse.json(
++      { error: err instanceof Error ? err.message : String(err) },
++      { status: 500 },
++    );
++  }
++}
+-- 
+2.47.3
+
+
+From fcbd289ab46a884a52ee353f945ccea7ee9ded82 Mon Sep 17 00:00:00 2001
+From: FT Wave1 <wave1@futures-tracker.app>
+Date: Sun, 4 Oct 2026 22:43:20 +0000
+Subject: [PATCH 4/4] =?UTF-8?q?feat(site):=20=D0=BF=D1=83=D0=B1=D0=BB?=
+ =?UTF-8?q?=D0=B8=D1=87=D0=BD=D1=8B=D0=B5=20=D1=81=D1=82=D1=80=D0=B0=D0=BD?=
+ =?UTF-8?q?=D0=B8=D1=86=D1=8B=20/privacy=20=D0=B8=20/terms=20(=D1=82=D1=80?=
+ =?UTF-8?q?=D0=B5=D0=B1=D0=BE=D0=B2=D0=B0=D0=BD=D0=B8=D0=B5=20=D1=81=D1=82?=
+ =?UTF-8?q?=D0=BE=D1=80=D0=BE=D0=B2)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Google Play (Data safety / Account deletion) и App Store (Review 5.1.1)
+требуют общедоступный URL политики конфиденциальности у приложения с
+созданием аккаунта и подпиской. Обе страницы добавлены в publicPaths
+middleware — открываются без логина и allowlist, иначе стор-ревьюер
+получил бы редирект на /login.
+
+В футер сайта добавлены ссылки на обе страницы. Перед подачей на ревью
+заменить SUPPORT_EMAIL в app/privacy/page.tsx и app/terms/page.tsx
+(помечено TODO).
+---
+ app/layout.tsx       |  11 ++++
+ app/privacy/page.tsx | 147 +++++++++++++++++++++++++++++++++++++++++++
+ app/terms/page.tsx   | 117 ++++++++++++++++++++++++++++++++++
+ middleware.ts        |  12 +++-
+ 4 files changed, 286 insertions(+), 1 deletion(-)
+ create mode 100644 app/privacy/page.tsx
+ create mode 100644 app/terms/page.tsx
+
+diff --git a/app/layout.tsx b/app/layout.tsx
+index 7d9220a..f62ca14 100644
+--- a/app/layout.tsx
++++ b/app/layout.tsx
+@@ -133,6 +133,17 @@ export default async function RootLayout({
+               </nav>
+             </header>
+             <main className="flex-1 px-4 sm:px-6 py-6 sm:py-8">{children}</main>
++            <footer className="px-4 sm:px-6 py-4 border-t border-[var(--color-border)] flex items-center justify-between text-xs text-[var(--color-text-faint)]">
++              <span>Futures Tracker</span>
++              <span className="flex items-center gap-4">
++                <Link href="/privacy" className="hover:text-[var(--color-accent)] transition-colors">
++                  Политика конфиденциальности
++                </Link>
++                <Link href="/terms" className="hover:text-[var(--color-accent)] transition-colors">
++                  Условия использования
++                </Link>
++              </span>
++            </footer>
+           </div>
+         </ThemeProvider>
+       </body>
+diff --git a/app/privacy/page.tsx b/app/privacy/page.tsx
+new file mode 100644
+index 0000000..08470bb
+--- /dev/null
++++ b/app/privacy/page.tsx
+@@ -0,0 +1,147 @@
++import type { Metadata } from "next";
++
++export const metadata: Metadata = {
++  title: "Политика конфиденциальности — Futures Tracker",
++  description:
++    "Как Futures Tracker собирает, использует и защищает данные пользователей.",
++};
++
++/**
++ * Публичная страница политики конфиденциальности.
++ *
++ * Требование Google Play (Data safety / Account deletion) и App Store
++ * (Review 5.1.1): у приложения с созданием аккаунта должен быть
++ * общедоступный URL политики. Страница добавлена в publicPaths
++ * middleware — без логина и allowlist.
++ *
++ * ⚠️ Перед публикацией в сторы заполните SUPPORT_EMAIL ниже.
++ */
++const SUPPORT_EMAIL = "support@example.com"; // TODO: заменить на реальный
++
++const LAST_UPDATED = "2026-10-05";
++
++function Section({ title, children }: { title: string; children: React.ReactNode }) {
++  return (
++    <section className="flex flex-col gap-3">
++      <h2 className="text-lg font-bold text-[var(--color-text)]">{title}</h2>
++      <div className="text-sm leading-relaxed text-[var(--color-text-muted)] flex flex-col gap-3">
++        {children}
++      </div>
++    </section>
++  );
++}
++
++export default function PrivacyPage() {
++  return (
++    <div className="max-w-2xl mx-auto flex flex-col gap-8 py-4">
++      <header className="flex flex-col gap-2">
++        <h1 className="text-2xl font-extrabold text-[var(--color-text)]">
++          Политика конфиденциальности
++        </h1>
++        <p className="text-xs text-[var(--color-text-faint)]">
++          Futures Tracker · Последнее обновление: {LAST_UPDATED}
++        </p>
++      </header>
++
++      <p className="text-sm leading-relaxed text-[var(--color-text-muted)]">
++        Настоящая политика описывает, какие данные обрабатывает приложение
++        Futures Tracker (&laquo;мы&raquo;, &laquo;приложение&raquo;) при
++        регистрации, использовании трекера фьючерсных сделок и оформлении
++        подписки Premium. Мы собираем минимум данных, необходимый для работы
++        функций, и не продаём и не передаём их третьим лицам для рекламы.
++      </p>
++
++      <Section title="1. Какие данные мы собираем">
++        <p>
++          <strong className="text-[var(--color-text)]">Данные аккаунта.</strong>{" "}
++          При входе через Google или Apple мы получаем адрес электронной почты,
++          имя (если провайдер его передаёт) и идентификатор провайдера. Эти
++          данные хранятся в сервисе аутентификации Supabase.
++        </p>
++        <p>
++          <strong className="text-[var(--color-text)]">Данные о сделках.</strong>{" "}
++          Сделки, которые вы добавляете вручную, а также метаданные сделок,
++          подтянутые авто-синком с подключённых бирж (символ, направление,
++          объём, цены, P&amp;L, комиссии, funding, время открытия/закрытия).
++          Данные привязаны к вашему аккаунту и видны только вам.
++        </p>
++        <p>
++          <strong className="text-[var(--color-text)]">API-ключи бирж.</strong>{" "}
++          Если вы подключаете биржу, мы принимаем ваш API-ключ (с правами
++          &laquo;только чтение&raquo;) и шифруем его перед сохранением.
++          Ключ используется исключительно для синхронизации истории сделок от
++          вашего имени.
++        </p>
++        <p>
++          <strong className="text-[var(--color-text)]">Платёжные данные.</strong>{" "}
++          Покупка подписки Premium проходит через магазин приложения (Google
++          Play / App Store). Мы не получаем и не храним номера карт —
++          платёжный провайдер магазина передаёт нам через сервис RevenueCat
++          только факт покупки, её срок и идентификатор для восстановления.
++        </p>
++      </Section>
++
++      <Section title="2. Зачем мы обрабатываем данные">
++        <p>
++          Данные обрабатываются для предоставления функциональности приложения:
++          ведение журнала сделок, расчёт статистики и графиков, синхронизация
++          с биржами по вашему запросу, управление подпиской Premium, а также
++          для безопасности аккаунта и защиты от злоупотреблений.
++        </p>
++      </Section>
++
++      <Section title="3. Где хранятся данные">
++        <p>
++          Данные хранятся в облачной базе Supabase и обрабатываются серверами
++          Vercel. API-ключи бирж дополнительно шифруются. Доступ к
++          персональным данным имеют только администраторы приложения в
++          объёме, необходимом для поддержки пользователей.
++        </p>
++      </Section>
++
++      <Section title="4. Сторонние сервисы">
++        <p>
++          Мы используем: <strong className="text-[var(--color-text)]">Supabase</strong>{" "}
++          (аутентификация и база данных), <strong className="text-[var(--color-text)]">Vercel</strong>{" "}
++          (хостинг), <strong className="text-[var(--color-text)]">RevenueCat</strong>{" "}
++          (управление подписками), <strong className="text-[var(--color-text)]">Google</strong>{" "}
++          и <strong className="text-[var(--color-text)]">Apple</strong> (вход через
++          провайдера), а также публичные API подключённых вами бирж. Каждый
++          сервис обрабатывает данные в соответствии со своей политикой
++          конфиденциальности.
++        </p>
++      </Section>
++
++      <Section title="5. Срок хранения и удаление">
++        <p>
++          Данные хранятся, пока существует ваш аккаунт. Вы можете удалить
++          аккаунт в любой момент прямо из приложения: Настройки → &laquo;Удалить
++          аккаунт&raquo;. Удаление необратимо и стирает профиль, все сделки,
++          снимки баланса и подключения бирж. Отдельные запросы на удаление
++          можно направить на {SUPPORT_EMAIL}.
++        </p>
++      </Section>
++
++      <Section title="6. Ваши права">
++        <p>
++          В зависимости от юрисдикции вы имеете право на доступ к своим данным,
++          их исправление, экспорт и удаление, а также на отзыв согласия на
++          обработку. Для этого используйте удаление аккаунта из приложения или
++          напишите нам на {SUPPORT_EMAIL} — ответим в течение 30 дней.
++        </p>
++      </Section>
++
++      <Section title="7. Изменения политики">
++        <p>
++          Мы можем обновлять эту политику при изменении функциональности
++          приложения. Актуальная версия всегда доступна на этой странице, а
++          существенные изменения анонсируются в приложении.
++        </p>
++      </Section>
++
++      <footer className="text-xs text-[var(--color-text-faint)] pt-4 border-t border-[var(--color-border)]">
++        Контакт: {SUPPORT_EMAIL}
++      </footer>
++    </div>
++  );
++}
+diff --git a/app/terms/page.tsx b/app/terms/page.tsx
+new file mode 100644
+index 0000000..873ac2b
+--- /dev/null
++++ b/app/terms/page.tsx
+@@ -0,0 +1,117 @@
++import type { Metadata } from "next";
++
++export const metadata: Metadata = {
++  title: "Условия использования — Futures Tracker",
++  description: "Условия использования приложения и подписки Futures Tracker.",
++};
++
++/**
++ * Публичная страница условий использования (Terms of Use).
++ * Требование App Store Review (подписки должны иметь публичные terms)
++ * и Google Play. Добавлена в publicPaths middleware.
++ *
++ * ⚠️ Перед публикацией заполните SUPPORT_EMAIL.
++ */
++const SUPPORT_EMAIL = "support@example.com"; // TODO: заменить на реальный
++
++const LAST_UPDATED = "2026-10-05";
++
++function Section({ title, children }: { title: string; children: React.ReactNode }) {
++  return (
++    <section className="flex flex-col gap-3">
++      <h2 className="text-lg font-bold text-[var(--color-text)]">{title}</h2>
++      <div className="text-sm leading-relaxed text-[var(--color-text-muted)] flex flex-col gap-3">
++        {children}
++      </div>
++    </section>
++  );
++}
++
++export default function TermsPage() {
++  return (
++    <div className="max-w-2xl mx-auto flex flex-col gap-8 py-4">
++      <header className="flex flex-col gap-2">
++        <h1 className="text-2xl font-extrabold text-[var(--color-text)]">
++          Условия использования
++        </h1>
++        <p className="text-xs text-[var(--color-text-faint)]">
++          Futures Tracker · Последнее обновление: {LAST_UPDATED}
++        </p>
++      </header>
++
++      <Section title="1. О сервисе">
++        <p>
++          Futures Tracker — приложение для ведения журнала фьючерсных сделок и
++          личной статистики. Сервис предоставляется &laquo;как есть&raquo; и
++          предназначен для личного некоммерческого использования трейдером для
++          учёта собственной активности.
++        </p>
++      </Section>
++
++      <Section title="2. Аккаунт">
++        <p>
++          Для работы приложения требуется аккаунт (вход через Google или
++          Apple). Вы отвечаете за сохранность доступа к своему аккаунту
++          провайдера. Аккаунт можно удалить в любой момент в настройках
++          приложения — все связанные данные будут стёрты безвозвратно.
++        </p>
++      </Section>
++
++      <Section title="3. Бесплатный план и подписка Premium">
++        <p>
++          Бесплатный план позволяет вести до 50 сделок. Подписка Premium
++          (авто-синк бирж и неограниченное количество сделок) оформляется
++          через встроенную покупку в Google Play или App Store и
++          автоматически продлевается, пока вы её не отмените.
++        </p>
++        <p>
++          Оплата списывается с вашего счёта в магазине при подтверждении
++          покупки. Управление подпиской и отмену автопродления можно
++          выполнить в любой момент в настройках аккаунта магазина (Google
++          Play / App Store). После отмены подписка действует до конца
++          оплаченного периода.
++        </p>
++        <p>
++          Восстановление ранее купленной подписки доступно в приложении
++          кнопкой &laquo;Восстановить покупки&raquo; на экране Premium.
++        </p>
++      </Section>
++
++      <Section title="4. Ответственность и отказ от гарантий">
++        <p>
++          Приложение носит информационный характер и не является
++          инвестиционной рекомендацией, торговой платформой или Signals-as-a-
++          Service. Мы не гарантируем абсолютную точность загруженных с бирж
++          данных и не несём ответственности за торговые решения, принятые на
++          основе статистики приложения. Вы используете сервис на свой риск.
++        </p>
++        <p>
++          Функция авто-синка требует API-ключей биржи с правами
++          &laquo;только чтение&raquo;. Вы самостоятельно контролируете создание
++          и права таких ключей на стороне биржи.
++        </p>
++      </Section>
++
++      <Section title="5. Правомерное использование">
++        <p>
++          Запрещено использовать приложение в целях, нарушающих законы,
++          пытаться обходить лимиты бесплатного плана, вмешиваться в работу
++          серверов или злоупотреблять API. Мы вправе ограничить доступ при
++          нарушении этих условий.
++        </p>
++      </Section>
++
++      <Section title="6. Изменения условий">
++        <p>
++          Условия могут обновляться вместе с развитием приложения. Продолжая
++          использовать сервис после публикации изменений, вы принимаете
++          обновлённую редакцию. Вопросы и предложения: {SUPPORT_EMAIL}.
++        </p>
++      </Section>
++
++      <footer className="text-xs text-[var(--color-text-faint)] pt-4 border-t border-[var(--color-border)]">
++        Контакт: {SUPPORT_EMAIL}
++      </footer>
++    </div>
++  );
++}
+diff --git a/middleware.ts b/middleware.ts
+index 3eeb6f3..0eab79d 100644
+--- a/middleware.ts
++++ b/middleware.ts
+@@ -42,7 +42,17 @@ export async function middleware(request: NextRequest) {
+   }
+ 
+   // Публичные пути — логин, OAuth callback, страница отказа, статичные assets.
+-  const publicPaths = ["/login", "/auth/callback", "/auth/auth-code-error", "/not-allowed"];
++  // /privacy и /terms — публичные юридические страницы (требование Google Play
++  // Data safety и App Review 5.1.1): стор должен уметь их открыть без логина
++  // и без allowlist.
++  const publicPaths = [
++    "/login",
++    "/auth/callback",
++    "/auth/auth-code-error",
++    "/not-allowed",
++    "/privacy",
++    "/terms",
++  ];
+   if (publicPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
+     return NextResponse.next();
+   }
+-- 
+2.47.3
+

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateSyncRequest } from "@/lib/auth";
-import { getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
+import { getCronSyncDays, getSyncTargets, syncAllUsers, syncUserExchange, summarizeResults } from "@/lib/sync";
 import { EXCHANGES, REGISTRY } from "@/lib/exchanges";
 
 export const maxDuration = 60;
@@ -10,6 +10,11 @@ export const maxDuration = 60;
  * Обходит ВСЕ биржи последовательно.
  *
  * Авторизация: только Vercel cron (Bearer $CRON_SECRET).
+ *
+ * ⚠️ Окно ИНКРЕМЕНТАЛЬНОЕ (CRON_SYNC_DAYS, по умолчанию 7 дней), а не 365:
+ * год по всем юзерам = сотни последовательных запросов к биржам и не
+ * влезает в maxDuration=60 Hobby-плана (FUNCTION_INVOCATION_TIMEOUT).
+ * Полная история подтягивается ручной кнопкой синка (user-режим, 365 дней).
  */
 export async function GET(req: NextRequest) {
   try {
@@ -23,7 +28,7 @@ export async function GET(req: NextRequest) {
     }
 
     const now = Date.now();
-    const sinceMs = now - 365 * 24 * 60 * 60 * 1000;
+    const sinceMs = now - getCronSyncDays() * 24 * 60 * 60 * 1000;
     const allResults: { exchange: string; processed: number; succeeded: number; failed: number; upserted: number; errors: { userId: string; error: string }[] }[] = [];
 
     for (const exchange of EXCHANGES) {
@@ -49,7 +54,7 @@ export async function GET(req: NextRequest) {
 
     const totalUpserted = allResults.reduce((acc, r) => acc + r.upserted, 0);
     const totalFailed = allResults.reduce((acc, r) => acc + r.failed, 0);
-    console.log(`[cron] done: ${totalUpserted} upserted, ${totalFailed} failed across ${EXCHANGES.length} exchanges`);
+    console.log(`[cron] done: ${totalUpserted} upserted, ${totalFailed} failed across ${EXCHANGES.length} exchanges (window: ${getCronSyncDays()}d)`);
 
     return NextResponse.json({
       ok: totalFailed === 0,
