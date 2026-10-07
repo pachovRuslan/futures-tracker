@@ -1,4 +1,4 @@
-import type { Trade, Exchange } from "@/lib/types";
+import type { Trade } from "@/lib/types";
 
 /**
  * Бизнес-логика расчётов по сделкам — чистые функции без React.
@@ -35,17 +35,6 @@ export function fmtDate(iso: string): string {
   return new Date(iso).toLocaleString("ru-RU", {
     day: "2-digit",
     month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-export function fmtDateLong(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
   });

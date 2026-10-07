@@ -19,10 +19,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const PREMIUM_REQUIRED_CODE = "PREMIUM_REQUIRED";
 
-export interface PremiumCheckResult {
-  premium: boolean;
-}
-
 /**
  * Запрос пришёл от мобильного приложения (Bearer-JWT), а не от
  * cookie-сессии сайта. Именно мобильная поверхность — freemium.

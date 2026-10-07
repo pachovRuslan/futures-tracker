@@ -25,16 +25,6 @@ export interface Trade {
   raw: unknown;
 }
 
-export interface MonthlySummary {
-  month: string; // "2026-07"
-  totalPnl: number;
-  totalFee: number;
-  totalFunding: number;
-  netPnl: number;
-  tradeCount: number;
-  winRate: number;
-}
-
 // Поля, которые пользователь заполняет вручную при добавлении сделки
 export interface ManualTradeInput {
   symbol: string;
@@ -54,19 +44,6 @@ export interface ManualTradeInput {
 // если передавать notes: null явно, upsert будет затирать вручную написанные
 // заметки при каждом ресинке. Отсутствие ключа в payload = колонка не трогается.
 export type SyncedTrade = Omit<Trade, "id" | "notes" | "user_id">;
-
-// Ручной снапшот баланса пользователя.
-//   type: 'spot'    — спотовый капитал, только ручной ввод
-//   type: 'futures' — фьючерсный депозит, обычно auto (PnL), но может быть
-//                     переопределён ручным снапшотом на конкретную дату.
-export interface BalanceSnapshot {
-  id: string;
-  type: "spot" | "futures";
-  value_usd: number;
-  snapshot_date: string; // YYYY-MM-DD
-  note: string | null;
-  created_at: string;
-}
 
 // Настройки пользователя для графика баланса.
 //   goal_usd — горизонтальная линия цели (например $10 000)

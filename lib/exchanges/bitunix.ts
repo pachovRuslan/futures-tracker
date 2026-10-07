@@ -129,7 +129,7 @@ function toIso(value: unknown): string {
  */
 async function fetchClosedTrades(
   credentials: ExchangeCredentials,
-  opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
+  _opts?: { sinceMs?: number; untilMs?: number; cursor?: string }
 ): Promise<{ trades: SyncedTrade[]; nextCursor: string | null }> {
   // Список торгуемых символов из env. Если пусто — тянем все разом.
   const symbolsEnv = process.env.BITUNIX_SYMBOLS?.trim();
@@ -281,5 +281,3 @@ export const bitunixAdapter: ExchangeAdapter = {
   testCredentials,
 };
 
-// Обратная совместимость
-export { fetchClosedTrades as fetchBitunixHistoryPositions, testCredentials as testBitunixCredentials };

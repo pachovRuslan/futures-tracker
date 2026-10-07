@@ -55,13 +55,6 @@ export const REGISTRY: Record<Exchange, ExchangeAdapter> = {
 };
 
 /**
- * Список реальных бирж (без manual) для UI — форма подключения, фильтры.
- */
-export function getExchangeList(): { id: Exchange; label: string }[] {
-  return EXCHANGES.map((id) => ({ id, label: REGISTRY[id].label }));
-}
-
-/**
  * Проверка, что строка — валидный идентификатор биржи (без manual).
  */
 export function isValidExchange(value: string): value is Exchange {
