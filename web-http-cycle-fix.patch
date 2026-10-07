@@ -1,0 +1,247 @@
+diff --git a/lib/exchanges/binance.ts b/lib/exchanges/binance.ts
+index 212bf09..aebfb9e 100644
+--- a/lib/exchanges/binance.ts
++++ b/lib/exchanges/binance.ts
+@@ -1,7 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+-import { fetchWithRetry } from "@/lib/sync";
++import { fetchWithRetry } from "@/lib/http";
+ 
+ const BASE_URL = "https://fapi.binance.com";
+ 
+diff --git a/lib/exchanges/bingx.ts b/lib/exchanges/bingx.ts
+index 734a939..f763387 100644
+--- a/lib/exchanges/bingx.ts
++++ b/lib/exchanges/bingx.ts
+@@ -1,7 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+-import { fetchWithRetry } from "@/lib/sync";
++import { fetchWithRetry } from "@/lib/http";
+ 
+ const BASE_URL = "https://open-api.bingx.com";
+ 
+diff --git a/lib/exchanges/bitget.ts b/lib/exchanges/bitget.ts
+index e707358..2f2ca69 100644
+--- a/lib/exchanges/bitget.ts
++++ b/lib/exchanges/bitget.ts
+@@ -1,7 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+-import { fetchWithRetry } from "@/lib/sync";
++import { fetchWithRetry } from "@/lib/http";
+ 
+ const BASE_URL = "https://api.bitget.com";
+ 
+diff --git a/lib/exchanges/bitunix.ts b/lib/exchanges/bitunix.ts
+index a604ff3..5be13ce 100644
+--- a/lib/exchanges/bitunix.ts
++++ b/lib/exchanges/bitunix.ts
+@@ -1,7 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+-import { fetchWithRetry } from "@/lib/sync";
++import { fetchWithRetry } from "@/lib/http";
+ 
+ const BASE_URL = "https://fapi.bitunix.com";
+ 
+diff --git a/lib/exchanges/bybit.ts b/lib/exchanges/bybit.ts
+index 645fbdf..06e46f4 100644
+--- a/lib/exchanges/bybit.ts
++++ b/lib/exchanges/bybit.ts
+@@ -1,7 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+-import { fetchWithRetry } from "@/lib/sync";
++import { fetchWithRetry } from "@/lib/http";
+ 
+ const BASE_URL = "https://api.bybit.com";
+ const RECV_WINDOW = "5000";
+diff --git a/lib/exchanges/mexc.ts b/lib/exchanges/mexc.ts
+index 1eec247..395bcb3 100644
+--- a/lib/exchanges/mexc.ts
++++ b/lib/exchanges/mexc.ts
+@@ -1,7 +1,7 @@
+ import crypto from "crypto";
+ import type { SyncedTrade } from "../types";
+ import type { ExchangeAdapter, ExchangeCredentials } from "./types";
+-import { fetchWithRetry } from "@/lib/sync";
++import { fetchWithRetry } from "@/lib/http";
+ 
+ const BASE_URL = "https://contract.mexc.com";
+ 
+diff --git a/lib/http.ts b/lib/http.ts
+new file mode 100644
+index 0000000..7681f49
+--- /dev/null
++++ b/lib/http.ts
+@@ -0,0 +1,74 @@
++// ============================================================
++// fetchWithRetry — HTTP-запрос с timeout, retry и backoff
++// ============================================================
++//
++// Живёт в ОТДЕЛЬНОМ модуле (не в lib/sync.ts), чтобы разорвать
++// циклическую зависимость:
++//   lib/sync.ts ──> lib/exchanges/index ──> адаптеры ──> lib/sync.ts
++// Адаптеры тянут отсюда только этот примитив; sync.ts про адаптеры
++// знает, но обратной стрелки больше нет.
++
++const DEFAULT_TIMEOUT_MS = 15_000;
++const DEFAULT_RETRIES = 3;
++
++/** Пауза между итерациями backoff; экспортирована для lib/sync.ts
++ *  (RATE_LIMIT_DELAY_MS между юзерами в syncAllUsers). */
++export function sleep(ms: number): Promise<void> {
++  return new Promise((resolve) => setTimeout(resolve, ms));
++}
++
++/**
++ * HTTP-запрос с:
++ *   - timeout (AbortController, по умолчанию 15 сек)
++ *   - retry (по умолчанию 3 попытки)
++ *   - exponential backoff (1с, 2с, 4с)
++ *   - Retry-After header (если биржа отдаёт 429/503)
++ *
++ * Используется во всех адаптерах вместо голого fetch().
++ * Бросает Error только если все попытки исчерпаны.
++ */
++export async function fetchWithRetry(
++  url: string,
++  options: RequestInit = {},
++  opts: { timeoutMs?: number; retries?: number } = {}
++): Promise<Response> {
++  const { timeoutMs = DEFAULT_TIMEOUT_MS, retries = DEFAULT_RETRIES } = opts;
++
++  for (let attempt = 0; attempt <= retries; attempt++) {
++    const controller = new AbortController();
++    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
++
++    try {
++      const res = await fetch(url, { ...options, signal: controller.signal });
++      clearTimeout(timeoutId);
++
++      // 429 Too Many Requests или 503 Service Unavailable — retry с backoff
++      if ((res.status === 429 || res.status === 503) && attempt < retries) {
++        // Читаем Retry-After header (в секундах), по умолчанию 2^attempt сек
++        const retryAfter = res.headers.get("retry-after");
++        const delaySec = retryAfter ? parseInt(retryAfter, 10) : Math.pow(2, attempt);
++        const delayMs = isNaN(delaySec) ? Math.pow(2, attempt) * 1000 : delaySec * 1000;
++        console.warn(
++          `[fetchWithRetry] ${res.status} on ${url.split("?")[0]}, retry ${attempt + 1}/${retries} after ${delayMs}ms`
++        );
++        await sleep(delayMs);
++        continue;
++      }
++
++      return res;
++    } catch (err) {
++      clearTimeout(timeoutId);
++      if (attempt === retries) throw err;
++
++      // Network error / timeout — retry с exponential backoff
++      const delayMs = Math.pow(2, attempt) * 1000;
++      console.warn(
++        `[fetchWithRetry] ${(err as Error).name} on ${url.split("?")[0]}, retry ${attempt + 1}/${retries} after ${delayMs}ms`
++      );
++      await sleep(delayMs);
++    }
++  }
++
++  // Не должны сюда дойти, но TS требует return
++  throw new Error("fetchWithRetry: все попытки исчерпаны");
++}
+diff --git a/lib/sync.ts b/lib/sync.ts
+index fe8dde5..c2a8f9a 100644
+--- a/lib/sync.ts
++++ b/lib/sync.ts
+@@ -1,8 +1,9 @@
+ import { getSupabaseServerClient } from "@/lib/supabase";
+ import { decrypt } from "@/lib/crypto";
++import { sleep } from "@/lib/http";
+ import type { ExchangeCredentials, ExchangeAdapter } from "@/lib/exchanges/types";
+ import type { SyncAuth } from "@/lib/auth";
+-import { EXCHANGES, isValidExchange } from "@/lib/exchanges";
++import { EXCHANGES } from "@/lib/exchanges";
+ 
+ export interface SyncTarget {
+   userId: string;
+@@ -15,73 +16,6 @@ export interface SyncUserResult {
+   error?: string;
+ }
+ 
+-// ============================================================
+-// fetchWithRetry — HTTP-запрос с timeout, retry и backoff
+-// ============================================================
+-
+-const DEFAULT_TIMEOUT_MS = 15_000;
+-const DEFAULT_RETRIES = 3;
+-
+-function sleep(ms: number): Promise<void> {
+-  return new Promise((resolve) => setTimeout(resolve, ms));
+-}
+-
+-/**
+- * HTTP-запрос с:
+- *   - timeout (AbortController, по умолчанию 15 сек)
+- *   - retry (по умолчанию 3 попытки)
+- *   - exponential backoff (1с, 2с, 4с)
+- *   - Retry-After header (если биржа отдаёт 429/503)
+- *
+- * Используется во всех адаптерах вместо голого fetch().
+- * Бросает Error только если все попытки исчерпаны.
+- */
+-export async function fetchWithRetry(
+-  url: string,
+-  options: RequestInit = {},
+-  opts: { timeoutMs?: number; retries?: number } = {}
+-): Promise<Response> {
+-  const { timeoutMs = DEFAULT_TIMEOUT_MS, retries = DEFAULT_RETRIES } = opts;
+-
+-  for (let attempt = 0; attempt <= retries; attempt++) {
+-    const controller = new AbortController();
+-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+-
+-    try {
+-      const res = await fetch(url, { ...options, signal: controller.signal });
+-      clearTimeout(timeoutId);
+-
+-      // 429 Too Many Requests или 503 Service Unavailable — retry с backoff
+-      if ((res.status === 429 || res.status === 503) && attempt < retries) {
+-        // Читаем Retry-After header (в секундах), по умолчанию 2^attempt сек
+-        const retryAfter = res.headers.get("retry-after");
+-        const delaySec = retryAfter ? parseInt(retryAfter, 10) : Math.pow(2, attempt);
+-        const delayMs = isNaN(delaySec) ? Math.pow(2, attempt) * 1000 : delaySec * 1000;
+-        console.warn(
+-          `[fetchWithRetry] ${res.status} on ${url.split("?")[0]}, retry ${attempt + 1}/${retries} after ${delayMs}ms`
+-        );
+-        await sleep(delayMs);
+-        continue;
+-      }
+-
+-      return res;
+-    } catch (err) {
+-      clearTimeout(timeoutId);
+-      if (attempt === retries) throw err;
+-
+-      // Network error / timeout — retry с exponential backoff
+-      const delayMs = Math.pow(2, attempt) * 1000;
+-      console.warn(
+-        `[fetchWithRetry] ${(err as Error).name} on ${url.split("?")[0]}, retry ${attempt + 1}/${retries} after ${delayMs}ms`
+-      );
+-      await sleep(delayMs);
+-    }
+-  }
+-
+-  // Не должны сюда дойти, но TS требует return
+-  throw new Error("fetchWithRetry: все попытки исчерпаны");
+-}
+-
+ // ============================================================
+ // syncUserExchange — общий цикл пагинации (убран из 2 роутов)
+ // ============================================================

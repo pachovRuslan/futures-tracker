@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import type { SyncedTrade } from "../types";
 import type { ExchangeAdapter, ExchangeCredentials } from "./types";
-import { fetchWithRetry } from "@/lib/sync";
+import { fetchWithRetry } from "@/lib/http";
 
 const BASE_URL = "https://fapi.bitunix.com";
 

@@ -1,0 +1,82 @@
+-- ============================================================================
+-- Миграция 12: get_my_entitlement возвращает «эффективный премиум»
+-- ============================================================================
+--
+-- ПРОБЛЕМА (асимметрия premium-статуса клиент/сервер):
+--
+--   Сервер (сайт) считает premium через ft_is_effective_premium():
+--     is_premium (не истёк) OR is_allowlisted OR email в allowed_emails
+--
+--   Мобильное приложение через RPC get_my_entitlement() видело только:
+--     is_premium — и только при наличии строки в user_entitlements.
+--
+-- Следствие: юзер сайта из allowlist (allowed_emails), открыв приложение,
+-- видел статус FREE и пейволл — хотя сайт и REST-мост считают его premium.
+-- Отсюда же «недостижимая» ветка бейджа PREMIUM · BETA (is_allowlisted
+-- нигде не писался, а пустой результат RPC для юзера без строки в
+-- user_entitlements не отличим от «нет данных»).
+--
+-- РЕШЕНИЕ:
+--   1) RPC возвращает вычисленный is_effective_premium — вызовом ТОЙ ЖЕ
+--      функции ft_is_effective_premium(), что использует сайт. Источник
+--      правды остаётся один (миграция 10); дублировать логику в SQL мы
+--      не стали бы — это ровно та асимметрия, которую чиним.
+--   2) LEFT JOIN от auth.users: RPC всегда возвращает ровно одну строку
+--      для залогиненного юзера (раньше юзер без строки в
+--      user_entitlements получал пустой ответ). Колонки строки
+--      coalesce-ятся в false/null.
+--
+-- КОНТРАКТ ДЛЯ КЛИЕНТА (мобильное приложение):
+--   {
+--     user_id, email, is_premium, is_allowlisted,
+--     is_effective_premium: boolean,   -- <-- НОВОЕ
+--     granted_by, granted_at, expires_at, note
+--   }
+--   Клиент обязан иметь fallback на старую форму (без is_effective_premium),
+--   пока миграция не применена: is_premium && не истёк expires_at.
+--
+-- Совместимость: старый клиент читал те же колонки по именам — порядок
+-- и состав старых полей не меняются, добавляется только новое поле.
+--
+-- Идемпотентно: DROP + CREATE (вместо CREATE OR REPLACE), потому что
+-- возвращаемый тип МЕНЯЕТСЯ (SETOF user_entitlements → TABLE): Postgres
+-- запрещает менять return type через CREATE OR REPLACE (ошибка 42P13).
+-- DROP безопасен: функцию вызывает только мобильный клиент через
+-- PostgREST RPC — триггеров и представлений, зависящих от неё, нет.
+-- Права после DROP+CREATE пересоздаются блоком revoke/grant ниже.
+
+drop function if exists public.get_my_entitlement();
+
+create or replace function public.get_my_entitlement()
+returns table (
+  user_id              uuid,
+  email                text,
+  is_premium           boolean,
+  is_allowlisted       boolean,
+  is_effective_premium boolean,
+  granted_by           text,
+  granted_at           timestamptz,
+  expires_at           timestamptz,
+  note                 text
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    u.id,
+    u.email,
+    coalesce(e.is_premium, false),
+    coalesce(e.is_allowlisted, false),
+    public.ft_is_effective_premium(u.id),
+    e.granted_by,
+    e.granted_at,
+    e.expires_at,
+    e.note
+  from auth.users u
+  left join public.user_entitlements e on e.user_id = u.id
+  where u.id = auth.uid()
+$$;
+
+revoke all on function public.get_my_entitlement() from public, anon;
+grant execute on function public.get_my_entitlement() to authenticated;
