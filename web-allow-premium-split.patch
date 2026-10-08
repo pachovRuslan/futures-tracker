@@ -1,0 +1,203 @@
+diff --git a/app/api/billing/sync-entitlement/route.ts b/app/api/billing/sync-entitlement/route.ts
+index d9fffee..15a8c46 100644
+--- a/app/api/billing/sync-entitlement/route.ts
++++ b/app/api/billing/sync-entitlement/route.ts
+@@ -105,7 +105,7 @@ export async function POST(req: NextRequest) {
+     const svc = getSupabaseServerClient();
+     const { data: current, error: readError } = await svc
+       .from("user_entitlements")
+-      .select("is_premium, is_allowlisted, expires_at, granted_by")
++      .select("is_premium, expires_at, granted_by")
+       .eq("user_id", user.id)
+       .maybeSingle();
+     if (readError) throw readError;
+@@ -149,13 +149,13 @@ export async function POST(req: NextRequest) {
+       if (updateError) throw updateError;
+     }
+ 
+-    // Текущий статус без RC: allowlisted-юзер или ручная выдача.
++    // Текущий статус без RC: только is_premium (не истёк). Allowlist
++    // премиумом больше не считается — миграция 13 (allow = вход).
+     const stillPremium = Boolean(
+       current &&
+-        (current.is_allowlisted ||
+-          (current.is_premium &&
+-            (!current.expires_at ||
+-              new Date(current.expires_at).getTime() > Date.now()))),
++        current.is_premium &&
++        (!current.expires_at ||
++          new Date(current.expires_at).getTime() > Date.now()),
+     );
+ 
+     return NextResponse.json({
+diff --git a/app/api/connections/route.ts b/app/api/connections/route.ts
+index 48fe5b7..544136f 100644
+--- a/app/api/connections/route.ts
++++ b/app/api/connections/route.ts
+@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
+     // платная фича мобилки. Cookie-сессию сайта не гейтим — он за
+     // allowlist-middleware, его юзеры и так «клуб».
+     if (isMobileRequest(req)) {
+-      const premium = await isPremiumUser(supabase, user.id, user.email);
++      const premium = await isPremiumUser(supabase, user.id);
+       if (!premium) return premiumRequiredResponse();
+     }
+ 
+diff --git a/lib/entitlements.test.ts b/lib/entitlements.test.ts
+new file mode 100644
+index 0000000..2d70014
+--- /dev/null
++++ b/lib/entitlements.test.ts
+@@ -0,0 +1,77 @@
++import { describe, expect, it, vi } from "vitest";
++import type { SupabaseClient } from "@supabase/supabase-js";
++import { isPremiumUser } from "./entitlements";
++
++/**
++ * Миграция 13 (разделение allow/premium): isPremiumUser считает
++ * премиумом ТОЛЬКО is_premium (не истёк). Ни is_allowlisted, ни
++ * отсутствие строки с последующим фолбэком в allowed_emails премиум
++ * не дают.
++ */
++
++interface EntitlementRow {
++  is_premium: boolean | null;
++  expires_at: string | null;
++  is_allowlisted?: boolean | null;
++}
++
++function makeClient(row: EntitlementRow | null, readError: unknown = null) {
++  const maybeSingle = vi.fn(async () => ({ data: row, error: readError }));
++  const eq = vi.fn(() => ({ maybeSingle }));
++  const select = vi.fn(() => ({ eq }));
++  const from = vi.fn(() => ({ select }));
++  return { client: { from } as unknown as SupabaseClient, from };
++}
++
++const HOUR = 3_600_000;
++
++describe("isPremiumUser (после миграции 13: allow ≠ premium)", () => {
++  it("бессрочная подписка → premium", async () => {
++    const { client } = makeClient({ is_premium: true, expires_at: null });
++    expect(await isPremiumUser(client, "u1")).toBe(true);
++  });
++
++  it("подписка с будущим expires_at → premium", async () => {
++    const { client } = makeClient({
++      is_premium: true,
++      expires_at: new Date(Date.now() + HOUR).toISOString(),
++    });
++    expect(await isPremiumUser(client, "u1")).toBe(true);
++  });
++
++  it("истёкшая подписка → не premium", async () => {
++    const { client } = makeClient({
++      is_premium: true,
++      expires_at: new Date(Date.now() - HOUR).toISOString(),
++    });
++    expect(await isPremiumUser(client, "u1")).toBe(false);
++  });
++
++  it("is_allowlisted = true больше НЕ даёт премиум", async () => {
++    const { client } = makeClient({
++      is_premium: false,
++      is_allowlisted: true,
++      expires_at: null,
++    });
++    expect(await isPremiumUser(client, "u1")).toBe(false);
++  });
++
++  it("нет строки в user_entitlements → не premium (фолбэка нет)", async () => {
++    const { client, from } = makeClient(null);
++    expect(await isPremiumUser(client, "u1")).toBe(false);
++    // Ключевая структурная проверка разделения: ровно один запрос,
++    // только в user_entitlements — allowed_emails не читается вовсе.
++    expect(from).toHaveBeenCalledTimes(1);
++    expect(from).toHaveBeenCalledWith("user_entitlements");
++  });
++
++  it("is_premium = false → не premium", async () => {
++    const { client } = makeClient({ is_premium: false, expires_at: null });
++    expect(await isPremiumUser(client, "u1")).toBe(false);
++  });
++
++  it("ошибка чтения → не premium (fail-closed)", async () => {
++    const { client } = makeClient(null, { message: "rls denied" });
++    expect(await isPremiumUser(client, "u1")).toBe(false);
++  });
++});
+diff --git a/lib/entitlements.ts b/lib/entitlements.ts
+index a73633a..4c2b805 100644
+--- a/lib/entitlements.ts
++++ b/lib/entitlements.ts
+@@ -4,12 +4,16 @@ import type { SupabaseClient } from "@supabase/supabase-js";
+ /**
+  * Серверная проверка премиум-статуса для API-роутов.
+  *
+- * Дублирует SQL-функцию ft_is_effective_premium (миграция 10):
+- *   a) user_entitlements.is_premium = true и подписка не истекла
+- *      (expires_at NULL = бессрочно);
+- *   b) user_entitlements.is_allowlisted = true;
+- *   c) email юзера есть в allowed_emails (web-allowlist — у юзеров
+- *      сайта строка в user_entitlements часто не создавалась).
++ * Зеркалит SQL-функцию ft_is_effective_premium после миграции 13
++ * (разделение allow/premium):
++ *   премиум = user_entitlements.is_premium = true И подписка не истекла
++ *   (expires_at NULL = бессрочно).
++ *
++ * Allowlist (allowed_emails / is_allowlisted) премиумом больше НЕ
++ * считается — он управляет только входом на сайт. Приглашённые юзеры
++ * освобождены от FREE-лимита 50 сделок отдельной веткой в триггере
++ * enforce_free_trade_limit (миграция 13): лимит и премиум-гейты
++ * касаются только открытых регистраций из приложения.
+  *
+  * Используется для гейта мобильных запросов (Bearer JWT) к премиум-фичам
+  * (/api/connections POST, /api/sync/[exchange]). Cookie-запросы сайта
+@@ -47,17 +51,18 @@ export function premiumRequiredResponse(): Response {
+  * Эффективный премиум-статус юзера.
+  *
+  * Клиент может быть любым: user-scoped (RLS пустит читать только свою
+- * строку user_entitlements и allowlist — обе политики это разрешают)
+- * или service-role.
++ * строку user_entitlements) или service-role.
++ *
++ * Премиум = только подписка/ручная выдача (is_premium, не истёк).
++ * Членство в allowed_emails статус НЕ поднимает (миграция 13).
+  */
+ export async function isPremiumUser(
+   supabase: SupabaseClient,
+   userId: string,
+-  email?: string | null,
+ ): Promise<boolean> {
+   const { data, error } = await supabase
+     .from("user_entitlements")
+-    .select("is_premium, is_allowlisted, expires_at")
++    .select("is_premium, expires_at")
+     .eq("user_id", userId)
+     .maybeSingle();
+ 
+@@ -66,21 +71,10 @@ export async function isPremiumUser(
+   }
+ 
+   if (data) {
+-    const active =
++    return (
+       data.is_premium &&
+-      (!data.expires_at || new Date(data.expires_at).getTime() > Date.now());
+-    if (active || data.is_allowlisted) return true;
+-  }
+-
+-  // Web-allowlist: юзеры сайта могли никогда не получить строку в
+-  // user_entitlements — проверяем email напрямую.
+-  if (email) {
+-    const { data: allowed } = await supabase
+-      .from("allowed_emails")
+-      .select("email")
+-      .eq("email", email.toLowerCase())
+-      .maybeSingle();
+-    if (allowed) return true;
++      (!data.expires_at || new Date(data.expires_at).getTime() > Date.now())
++    );
+   }
+ 
+   return false;

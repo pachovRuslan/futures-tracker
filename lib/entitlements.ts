@@ -4,12 +4,16 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 /**
  * Серверная проверка премиум-статуса для API-роутов.
  *
- * Дублирует SQL-функцию ft_is_effective_premium (миграция 10):
- *   a) user_entitlements.is_premium = true и подписка не истекла
- *      (expires_at NULL = бессрочно);
- *   b) user_entitlements.is_allowlisted = true;
- *   c) email юзера есть в allowed_emails (web-allowlist — у юзеров
- *      сайта строка в user_entitlements часто не создавалась).
+ * Зеркалит SQL-функцию ft_is_effective_premium после миграции 13
+ * (разделение allow/premium):
+ *   премиум = user_entitlements.is_premium = true И подписка не истекла
+ *   (expires_at NULL = бессрочно).
+ *
+ * Allowlist (allowed_emails / is_allowlisted) премиумом больше НЕ
+ * считается — он управляет только входом на сайт. Приглашённые юзеры
+ * освобождены от FREE-лимита 50 сделок отдельной веткой в триггере
+ * enforce_free_trade_limit (миграция 13): лимит и премиум-гейты
+ * касаются только открытых регистраций из приложения.
  *
  * Используется для гейта мобильных запросов (Bearer JWT) к премиум-фичам
  * (/api/connections POST, /api/sync/[exchange]). Cookie-запросы сайта
@@ -47,17 +51,18 @@ export function premiumRequiredResponse(): Response {
  * Эффективный премиум-статус юзера.
  *
  * Клиент может быть любым: user-scoped (RLS пустит читать только свою
- * строку user_entitlements и allowlist — обе политики это разрешают)
- * или service-role.
+ * строку user_entitlements) или service-role.
+ *
+ * Премиум = только подписка/ручная выдача (is_premium, не истёк).
+ * Членство в allowed_emails статус НЕ поднимает (миграция 13).
  */
 export async function isPremiumUser(
   supabase: SupabaseClient,
   userId: string,
-  email?: string | null,
 ): Promise<boolean> {
   const { data, error } = await supabase
     .from("user_entitlements")
-    .select("is_premium, is_allowlisted, expires_at")
+    .select("is_premium, expires_at")
     .eq("user_id", userId)
     .maybeSingle();
 
@@ -66,21 +71,10 @@ export async function isPremiumUser(
   }
 
   if (data) {
-    const active =
+    return (
       data.is_premium &&
-      (!data.expires_at || new Date(data.expires_at).getTime() > Date.now());
-    if (active || data.is_allowlisted) return true;
-  }
-
-  // Web-allowlist: юзеры сайта могли никогда не получить строку в
-  // user_entitlements — проверяем email напрямую.
-  if (email) {
-    const { data: allowed } = await supabase
-      .from("allowed_emails")
-      .select("email")
-      .eq("email", email.toLowerCase())
-      .maybeSingle();
-    if (allowed) return true;
+      (!data.expires_at || new Date(data.expires_at).getTime() > Date.now())
+    );
   }
 
   return false;

@@ -105,7 +105,7 @@ export async function POST(req: NextRequest) {
     const svc = getSupabaseServerClient();
     const { data: current, error: readError } = await svc
       .from("user_entitlements")
-      .select("is_premium, is_allowlisted, expires_at, granted_by")
+      .select("is_premium, expires_at, granted_by")
       .eq("user_id", user.id)
       .maybeSingle();
     if (readError) throw readError;
@@ -149,13 +149,13 @@ export async function POST(req: NextRequest) {
       if (updateError) throw updateError;
     }
 
-    // Текущий статус без RC: allowlisted-юзер или ручная выдача.
+    // Текущий статус без RC: только is_premium (не истёк). Allowlist
+    // премиумом больше не считается — миграция 13 (allow = вход).
     const stillPremium = Boolean(
       current &&
-        (current.is_allowlisted ||
-          (current.is_premium &&
-            (!current.expires_at ||
-              new Date(current.expires_at).getTime() > Date.now()))),
+        current.is_premium &&
+        (!current.expires_at ||
+          new Date(current.expires_at).getTime() > Date.now()),
     );
 
     return NextResponse.json({

@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
     // платная фича мобилки. Cookie-сессию сайта не гейтим — он за
     // allowlist-middleware, его юзеры и так «клуб».
     if (isMobileRequest(req)) {
-      const premium = await isPremiumUser(supabase, user.id, user.email);
+      const premium = await isPremiumUser(supabase, user.id);
       if (!premium) return premiumRequiredResponse();
     }
 
