@@ -67,7 +67,7 @@ export const BalanceSnapshotInput = z.object({
   type: z.enum(["spot", "futures"]),
   value_usd: z.number(),
   snapshot_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Дата в формате YYYY-MM-DD"),
-  note: z.string().max(500).optional(),
+  note: z.string().max(500).nullish(),
   is_delta: z.boolean().optional(),
 });
 
@@ -86,5 +86,5 @@ export const GoalInput = z.object({
 
 export const AllowlistInput = z.object({
   email: z.string().email("Некорректный email"),
-  note: z.string().max(500).optional(),
+  note: z.string().max(500).nullish(),
 });
