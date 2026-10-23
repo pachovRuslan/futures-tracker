@@ -53,6 +53,7 @@ export async function POST(req: NextRequest) {
   try {
     const secretKey = process.env.REVENUECAT_SECRET_API_KEY;
     if (!secretKey) {
+      console.error("[sync-entitlement] REVENUECAT_SECRET_API_KEY не задан");
       return NextResponse.json(
         { error: "REVENUECAT_NOT_CONFIGURED", message: "REVENUECAT_SECRET_API_KEY не задан на сервере" },
         { status: 503 },
@@ -65,19 +66,30 @@ export async function POST(req: NextRequest) {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) {
+      console.warn("[sync-entitlement] 401: токен не принят Supabase");
       return NextResponse.json({ error: "Не авторизован" }, { status: 401 });
     }
 
     // ─── 1. Спрашиваем RevenueCat о подписке этого app_user_id ───────────
     let rc: RcSubscriberResponse | null = null;
+    // Диагностика: статус ответа RC и ключи entitlements (без секретов) —
+    // уходят в логи и в ответ, чтобы «подписки нет» не было немой ошибкой.
+    let rcStatus: number | null = null;
     try {
       const res = await fetch(`${RC_V1_URL}/subscribers/${user.id}`, {
         headers: { Authorization: `Bearer ${secretKey}` },
       });
+      rcStatus = res.status;
       // v1 GET /subscribers создаёт подписчика, если его нет, и почти
       // всегда отвечает 200. Любой сбой сети/статус — «подписки нет».
       if (res.ok) {
         rc = (await res.json()) as RcSubscriberResponse;
+      } else {
+        console.error(
+          "[sync-entitlement] RevenueCat responded",
+          res.status,
+          (await res.text().catch(() => "")).slice(0, 200),
+        );
       }
     } catch (err) {
       console.error(
@@ -87,6 +99,15 @@ export async function POST(req: NextRequest) {
     }
 
     const entitlement = rc?.subscriber?.entitlements?.[entitlementId];
+    const rcEntitlementKeys = Object.keys(rc?.subscriber?.entitlements ?? {});
+    if (!entitlement) {
+      console.warn("[sync-entitlement] entitlement not found", {
+        wanted: entitlementId,
+        found: rcEntitlementKeys,
+        rcStatus,
+        userId: user.id,
+      });
+    }
     const isActive = Boolean(
       entitlement &&
         (!entitlement.expires_date ||
@@ -133,6 +154,7 @@ export async function POST(req: NextRequest) {
         premium: true,
         expiresAt,
         source: store ?? null,
+        rcStatus,
       });
     }
 
@@ -162,6 +184,10 @@ export async function POST(req: NextRequest) {
       premium: stillPremium,
       expiresAt: current?.expires_at ?? null,
       source: rcOwned ? "revenuecat:expired" : null,
+      // Диагностика: что реально вернул RC и какой entitlement ждёт сервер.
+      rcStatus,
+      wantedEntitlement: entitlementId,
+      rcEntitlements: rcEntitlementKeys,
     });
   } catch (err) {
     console.error(
