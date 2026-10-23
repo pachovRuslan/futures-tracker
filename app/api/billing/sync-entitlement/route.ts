@@ -55,12 +55,14 @@ export async function POST(req: NextRequest) {
     if (!secretKey) {
       console.error("[sync-entitlement] REVENUECAT_SECRET_API_KEY не задан");
       return NextResponse.json(
-        { error: "REVENUECAT_NOT_CONFIGURED", message: "REVENUECAT_SECRET_API_KEY не задан на сервере" },
+        {
+          error: "REVENUECAT_NOT_CONFIGURED",
+          message: "REVENUECAT_SECRET_API_KEY не задан на сервере",
+        },
         { status: 503 },
       );
     }
-    const entitlementId = process.env.REVENUECAT_ENTITLEMENT_ID || "premium";
-
+    const entitlementId = "premium";
     const supabase = await createApiSupabaseClient(req);
     const {
       data: { user },
@@ -110,12 +112,11 @@ export async function POST(req: NextRequest) {
     }
     const isActive = Boolean(
       entitlement &&
-        (!entitlement.expires_date ||
-          new Date(entitlement.expires_date).getTime() > Date.now()),
+      (!entitlement.expires_date ||
+        new Date(entitlement.expires_date).getTime() > Date.now()),
     );
-    const expiresAt = isActive && entitlement?.expires_date
-      ? entitlement.expires_date
-      : null;
+    const expiresAt =
+      isActive && entitlement?.expires_date ? entitlement.expires_date : null;
 
     const store =
       entitlement?.product_identifier != null
@@ -175,9 +176,9 @@ export async function POST(req: NextRequest) {
     // премиумом больше не считается — миграция 13 (allow = вход).
     const stillPremium = Boolean(
       current &&
-        current.is_premium &&
-        (!current.expires_at ||
-          new Date(current.expires_at).getTime() > Date.now()),
+      current.is_premium &&
+      (!current.expires_at ||
+        new Date(current.expires_at).getTime() > Date.now()),
     );
 
     return NextResponse.json({
